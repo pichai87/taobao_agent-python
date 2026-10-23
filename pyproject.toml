@@ -1,0 +1,23 @@
+[project]
+name = "taobao-agent"
+version = "0.1.0"
+description = "A gradual LangGraph learning project for ecommerce data analysis"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+    "pydantic>=2,<3",
+]
+
+[project.scripts]
+taobao-agent = "taobao_agent.workflow:main"
+taobao-intent = "taobao_agent.intent_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
