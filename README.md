@@ -57,13 +57,13 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 这条命令的目的是验证 Intent → Supervisor → Query → `search_metrics` 的真实调用链，会发送一次模型请求。**未设置指标目录文件时**，预期 `next_expert=query`，`answer` 提示“尚未配置 GMV 的指标定义，无法查询数据”。它不会产生 SQL，也不会给出 GMV 数值。只有模型把问题识别为取数意图时才会走到 Query；若输出不同，请提供不含 Key 的 JSON 结果。
 
-Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。没有 SQL 路径，SQL Validator Gate 尚未接入。
+Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。主图没有 SQL 执行路径；第 11 课的固定模板门禁尚未接入 Query。
 
 ## 指标目录文件
 
 如果以后取得经过人工核对的指标定义，可将它们放在一个 JSON 文件中，并在运行命令的终端设置 `TAOBAO_METRIC_CATALOG_PATH` 为该文件路径。文件内容是列表，每项包含 `name`、`table`、`field`、`source`；可选的 `calculation` 记录当前支持的 `sum`、日期字段、一个等值条件和单位。当前项目**没有提供真实指标文件**；第 8 课有使用虚构表名的格式示例，第 10 课解释计算规则。
 
-主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；当前仍不会生成 SQL 或访问数据库。
+主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；当前主命令仍不会生成 SQL 或访问数据库。
 
 ## 第 9 课的教学数据
 
@@ -72,6 +72,8 @@ Query 的指标查找现经由一个小型 Harness 错误边界：目录查找�
 在项目根目录运行 `UV_CACHE_DIR=/private/tmp/taobao-agent-uv-cache uv run --locked --offline python -m unittest discover -s tests -p 'test_demo_data.py' -v`，可以验证样例载入 SQLite 和固定日期的计算结果。这不调用模型，也不改变主命令；第 9 课解释了测试所用 SQL 和后续公开数据接入计划。
 
 当前只使用 Python 自带的 `sqlite3` 在测试进程内建立数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
+
+第 11 课新增 `metric_sql.py`：它根据样例指标规则与指定日期生成一种带 `?` 参数的只读 `SELECT SUM`，再由 `validate_metric_query()` 核对 SQL、参数及批准的表字段。测试用内存 SQLite 执行通过门禁的查询，得到 2026-10-22 的 200 元；主 Agent 仍未调用此模块。这个门禁只覆盖当前固定模板，尚不是任意 SQL 的通用校验器。第 11 课文档解释它的限制与调用链，无需安装新软件。
 
 ## 单独检查 Intent
 
