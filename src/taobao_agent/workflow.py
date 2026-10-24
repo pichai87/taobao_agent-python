@@ -11,6 +11,7 @@ from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
+from taobao_agent.demo_query_tool import DEMO_CATALOG_PATH
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
@@ -37,6 +38,7 @@ def build_workflow(
     model: ChatModel,
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
+    demo_data: bool = False,
 ):
     """Compile the main graph with the available Query and Other branches."""
 
@@ -53,7 +55,7 @@ def build_workflow(
 
     def query_node(state: WorkflowState) -> dict[str, str]:
         intent = IntentResult.model_validate(state["intent"])
-        return {"answer": answer_query(intent, metric_catalog)}
+        return {"answer": answer_query(intent, metric_catalog, demo_data=demo_data)}
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
         return state["next_expert"]
@@ -80,12 +82,13 @@ def run_workflow(
     model: ChatModel,
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
+    demo_data: bool = False,
 ) -> WorkflowResult:
     """Run the active path and return its decision and any available answer."""
 
     if not question.strip():
         raise ValueError("Question must not be empty")
-    state = build_workflow(model, reference_date, metric_catalog).invoke(
+    state = build_workflow(model, reference_date, metric_catalog, demo_data).invoke(
         {"question": question.strip()}
     )
     return WorkflowResult(
@@ -96,19 +99,28 @@ def run_workflow(
 def main() -> None:
     """Main CLI entry point for the current workflow."""
 
-    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与指标查找")
+    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与可选教学数据查询")
     parser.add_argument("question", help="输入一个问题")
     args = parser.parse_args()
 
     try:
         catalog_path = os.environ.get("TAOBAO_METRIC_CATALOG_PATH")
-        metric_catalog = load_metric_catalog(Path(catalog_path)) if catalog_path else ()
+        demo_setting = os.environ.get("TAOBAO_DEMO_DATA", "0")
+        if demo_setting not in {"0", "1"}:
+            raise ValueError("TAOBAO_DEMO_DATA 只接受 0 或 1")
+        demo_data = demo_setting == "1"
+        if demo_data and catalog_path:
+            raise ValueError("教学数据模式不能同时设置 TAOBAO_METRIC_CATALOG_PATH")
+        if demo_data:
+            metric_catalog = load_metric_catalog(DEMO_CATALOG_PATH)
+        else:
+            metric_catalog = load_metric_catalog(Path(catalog_path)) if catalog_path else ()
         model = create_qwen_model()
     except (RuntimeError, ValueError) as exc:
         parser.exit(2, f"{exc}\n")
 
     try:
-        result = run_workflow(args.question, model, date.today(), metric_catalog)
+        result = run_workflow(args.question, model, date.today(), metric_catalog, demo_data)
     except ModelRateLimitError:
         parser.exit(3, "百炼返回 429：当前模型请求受到限流，且规则无法识别该问题。\n")
     print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False))

@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 在可用时执行专家**。Other 能回复寒暄；Query 的第一步会调用本地指标查找函数。默认没有配置实际指标目录和数据源，所以 Query 会说明无法取数；Analysis 仍只输出交接目标。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 在可用时执行专家**。Other 能回复寒暄；Query 会先查指标，明确启用教学数据模式时还能查询项目自带的合成订单。默认没有配置真实指标目录和数据源，所以 Query 会说明无法取数；Analysis 仍只输出交接目标。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
 
 ## 环境与验证
 
@@ -57,23 +57,35 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 这条命令的目的是验证 Intent → Supervisor → Query → `search_metrics` 的真实调用链，会发送一次模型请求。**未设置指标目录文件时**，预期 `next_expert=query`，`answer` 提示“尚未配置 GMV 的指标定义，无法查询数据”。它不会产生 SQL，也不会给出 GMV 数值。只有模型把问题识别为取数意图时才会走到 Query；若输出不同，请提供不含 Key 的 JSON 结果。
 
-Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。主图没有 SQL 执行路径；第 11 课的固定模板门禁尚未接入 Query。
+Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。仅在下面的教学数据模式中，Query 才调用第 11 课的固定模板门禁和本地只读查询工具。
 
 ## 指标目录文件
 
 如果以后取得经过人工核对的指标定义，可将它们放在一个 JSON 文件中，并在运行命令的终端设置 `TAOBAO_METRIC_CATALOG_PATH` 为该文件路径。文件内容是列表，每项包含 `name`、`table`、`field`、`source`；可选的 `calculation` 记录当前支持的 `sum`、日期字段、一个等值条件和单位。当前项目**没有提供真实指标文件**；第 8 课有使用虚构表名的格式示例，第 10 课解释计算规则。
 
-主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；当前主命令仍不会生成 SQL 或访问数据库。
+主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；普通模式下主命令不会据自定义目录生成 SQL 或访问数据库。
 
 ## 第 9 课的教学数据
 
-`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段，并记录 `sum`、`paid_date`、`payment_status=paid` 和单位“分”。它们不是淘宝真实数据，也不是公开数据集的摘录。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。规则通过格式校验仍不足以证明真实表字段和业务口径正确；当前 Agent 不据此生成或执行 SQL。
+`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段，并记录 `sum`、`paid_date`、`payment_status=paid` 和单位“分”。它们不是淘宝真实数据，也不是公开数据集的摘录。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。规则通过格式校验仍不足以证明真实表字段和业务口径正确；只有明确启用教学数据模式时，Agent 才查询这些合成订单。
 
 在项目根目录运行 `UV_CACHE_DIR=/private/tmp/taobao-agent-uv-cache uv run --locked --offline python -m unittest discover -s tests -p 'test_demo_data.py' -v`，可以验证样例载入 SQLite 和固定日期的计算结果。这不调用模型，也不改变主命令；第 9 课解释了测试所用 SQL 和后续公开数据接入计划。
 
-当前只使用 Python 自带的 `sqlite3` 在测试进程内建立数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
+当前使用 Python 自带的 `sqlite3` 在内存中建立合成数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
 
-第 11 课新增 `metric_sql.py`：它根据样例指标规则与指定日期生成一种带 `?` 参数的只读 `SELECT SUM`，再由 `validate_metric_query()` 核对 SQL、参数及批准的表字段。测试用内存 SQLite 执行通过门禁的查询，得到 2026-10-22 的 200 元；主 Agent 仍未调用此模块。这个门禁只覆盖当前固定模板，尚不是任意 SQL 的通用校验器。第 11 课文档解释它的限制与调用链，无需安装新软件。
+第 11 课新增 `metric_sql.py`：它根据样例指标规则与指定日期生成一种带 `?` 参数的只读 `SELECT SUM`，再由 `validate_metric_query()` 核对 SQL、参数及批准的表字段。第 12 课让 Query 在教学数据模式下经由本地查询工具使用它。这个门禁只覆盖当前固定模板，尚不是任意 SQL 的通用校验器。
+
+## 第 12 课：明确启用教学数据查询
+
+在项目根目录、已准备好 Plus Key 的终端运行：
+
+```bash
+env -u TAOBAO_METRIC_CATALOG_PATH TAOBAO_DEMO_DATA=1 DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2026-10-22 GMV 多少？'
+```
+
+`env -u` 只为这一条命令移除可能残留的自定义指标目录；`TAOBAO_DEMO_DATA=1` 也只对这条命令生效。主命令会调用模型一次做意图识别，再由原有 Query 节点查内置样例目录、调用固定 SQL 门禁和只读内存 SQLite。若模型识别为单日 GMV 取数，预期 `answer` 含“教学合成数据”和“200.00 元”。这条命令会发送一次真实模型请求；本项目尚未在当前环境用你的 Key 实测。模型若误判意图或日期，结果可能不同。比较、分组、指定范围以及缺少日期的问题会提示当前教学模式暂不支持。
+
+不设置 `TAOBAO_DEMO_DATA=1` 时仍使用普通模式，不能查询合成订单。教学模式会自动加载 `examples/demo_metrics.json`，不能同时设置自定义 `TAOBAO_METRIC_CATALOG_PATH`；也不会访问外部数据库。具体调用链和测试边界见第 12 课文档。
 
 ## 单独检查 Intent
 
