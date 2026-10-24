@@ -65,6 +65,12 @@ Query 的指标查找现经由一个小型 Harness 错误边界：目录查找�
 
 主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；当前仍不会生成 SQL 或访问数据库。
 
+## 第 9 课的教学数据
+
+`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段。它们不是淘宝真实数据，也不是公开数据集的摘录。样例约定：GMV 只累加支付成功订单的 `order_amount_fen`，按 `paid_date` 归属；金额单位为分。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。当前指标 JSON **还没有机器可读的支付状态、日期和聚合规则**，因此不能据它自动生成安全、正确的查询。
+
+在项目根目录运行 `UV_CACHE_DIR=/private/tmp/taobao-agent-uv-cache uv run --locked --offline python -m unittest discover -s tests -p 'test_demo_data.py' -v`，可以验证样例载入 SQLite 和固定日期的计算结果。这不调用模型，也不改变主命令；第 9 课解释了测试所用 SQL 和后续公开数据接入计划。
+
 ## 单独检查 Intent
 
 在已设置 Plus Key 的同一个终端运行：

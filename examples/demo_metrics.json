@@ -1,0 +1,8 @@
+[
+  {
+    "name": "GMV",
+    "table": "demo_orders",
+    "field": "order_amount_fen",
+    "source": "examples/demo_shop.sql（项目合成样例）"
+  }
+]
