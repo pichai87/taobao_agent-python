@@ -32,9 +32,24 @@ class DemoDataTest(unittest.TestCase):
         metrics = load_metric_catalog(EXAMPLES / "demo_metrics.json")
 
         self.assertEqual(len(metrics), 1)
-        self.assertEqual(metrics[0].name, "GMV")
-        self.assertEqual(metrics[0].table, "demo_orders")
-        self.assertEqual(metrics[0].field, "order_amount_fen")
+        metric = metrics[0]
+        self.assertEqual(metric.name, "GMV")
+        self.assertEqual(metric.table, "demo_orders")
+        self.assertEqual(metric.field, "order_amount_fen")
+        self.assertIsNotNone(metric.calculation)
+        self.assertEqual(metric.calculation.aggregation, "sum")
+        self.assertEqual(metric.calculation.date_field, "paid_date")
+        self.assertEqual(metric.calculation.condition.field, "payment_status")
+        self.assertEqual(metric.calculation.condition.value, "paid")
+        self.assertEqual(metric.calculation.unit, "fen")
+
+        with closing(sqlite3.connect(":memory:")) as connection:
+            connection.executescript((EXAMPLES / "demo_shop.sql").read_text(encoding="utf-8"))
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(demo_orders)")}
+        self.assertTrue(
+            {metric.field, metric.calculation.date_field, metric.calculation.condition.field}
+            <= columns
+        )
 
 
 if __name__ == "__main__":

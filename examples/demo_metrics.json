@@ -3,6 +3,15 @@
     "name": "GMV",
     "table": "demo_orders",
     "field": "order_amount_fen",
-    "source": "examples/demo_shop.sql（项目合成样例）"
+    "source": "examples/demo_shop.sql（项目合成样例）",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "paid_date",
+      "condition": {
+        "field": "payment_status",
+        "value": "paid"
+      },
+      "unit": "fen"
+    }
   }
 ]

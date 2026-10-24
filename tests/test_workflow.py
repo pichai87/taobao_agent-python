@@ -289,6 +289,37 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("指标目录格式无效", stderr.getvalue())
         create_model.assert_not_called()
 
+    def test_main_cli_rejects_incomplete_calculation_before_model_call(self) -> None:
+        stderr = io.StringIO()
+        with TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "metrics.json"
+            catalog_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "GMV",
+                            "table": "demo_orders",
+                            "field": "order_amount_fen",
+                            "source": "test fixture",
+                            "calculation": {"aggregation": "sum"},
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {"TAOBAO_METRIC_CATALOG_PATH": str(catalog_path)}),
+                patch("sys.argv", ["taobao-agent", "昨天 GMV 多少？"]),
+                patch("sys.stderr", stderr),
+                patch("taobao_agent.workflow.create_qwen_model") as create_model,
+            ):
+                with self.assertRaises(SystemExit) as result:
+                    main()
+
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn("calculation", stderr.getvalue())
+        create_model.assert_not_called()
+
     def test_main_cli_explains_rate_limit_without_traceback(self) -> None:
         stderr = io.StringIO()
         with (

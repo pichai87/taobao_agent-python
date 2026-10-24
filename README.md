@@ -61,15 +61,17 @@ Query 的指标查找现经由一个小型 Harness 错误边界：目录查找�
 
 ## 指标目录文件
 
-如果以后取得经过人工核对的指标定义，可将它们放在一个 JSON 文件中，并在运行命令的终端设置 `TAOBAO_METRIC_CATALOG_PATH` 为该文件路径。文件内容是列表，每项包含 `name`、`table`、`field`、`source`。当前项目**没有提供真实指标文件**；第 8 课有使用虚构表名的格式示例。
+如果以后取得经过人工核对的指标定义，可将它们放在一个 JSON 文件中，并在运行命令的终端设置 `TAOBAO_METRIC_CATALOG_PATH` 为该文件路径。文件内容是列表，每项包含 `name`、`table`、`field`、`source`；可选的 `calculation` 记录当前支持的 `sum`、日期字段、一个等值条件和单位。当前项目**没有提供真实指标文件**；第 8 课有使用虚构表名的格式示例，第 10 课解释计算规则。
 
 主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；当前仍不会生成 SQL 或访问数据库。
 
 ## 第 9 课的教学数据
 
-`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段。它们不是淘宝真实数据，也不是公开数据集的摘录。样例约定：GMV 只累加支付成功订单的 `order_amount_fen`，按 `paid_date` 归属；金额单位为分。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。当前指标 JSON **还没有机器可读的支付状态、日期和聚合规则**，因此不能据它自动生成安全、正确的查询。
+`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段，并记录 `sum`、`paid_date`、`payment_status=paid` 和单位“分”。它们不是淘宝真实数据，也不是公开数据集的摘录。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。规则通过格式校验仍不足以证明真实表字段和业务口径正确；当前 Agent 不据此生成或执行 SQL。
 
 在项目根目录运行 `UV_CACHE_DIR=/private/tmp/taobao-agent-uv-cache uv run --locked --offline python -m unittest discover -s tests -p 'test_demo_data.py' -v`，可以验证样例载入 SQLite 和固定日期的计算结果。这不调用模型，也不改变主命令；第 9 课解释了测试所用 SQL 和后续公开数据接入计划。
+
+当前只使用 Python 自带的 `sqlite3` 在测试进程内建立数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
 
 ## 单独检查 Intent
 

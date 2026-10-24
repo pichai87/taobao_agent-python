@@ -19,7 +19,8 @@ def load_metric_catalog(path: Path) -> tuple[MetricDefinition, ...]:
         metrics = TypeAdapter(list[MetricDefinition]).validate_json(contents)
     except ValidationError as exc:
         raise ValueError(
-            "指标目录格式无效：需要指标对象列表，且每项包含 name、table、field、source"
+            "指标目录格式无效：每项需要 name、table、field、source；"
+            "calculation 如有提供，还需要 aggregation、date_field、condition、unit"
         ) from exc
 
     names: set[str] = set()
