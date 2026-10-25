@@ -7,12 +7,14 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "langchain-openai>=1,<2",
     "langgraph>=1,<2",
+    "openpyxl>=3.1,<4",
     "pydantic>=2,<3",
 ]
 
 [project.scripts]
 taobao-agent = "taobao_agent.workflow:main"
 taobao-intent = "taobao_agent.intent_agent:main"
+taobao-import-uci = "taobao_agent.uci_online_retail:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14"]

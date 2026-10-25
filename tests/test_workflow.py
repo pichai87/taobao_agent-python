@@ -3,7 +3,9 @@
 import io
 import json
 import os
+import sqlite3
 import unittest
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,13 +21,19 @@ from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import create_qwen_model
 from taobao_agent.query_agent import answer_query
+from taobao_agent.uci_online_retail import UCI_CATALOG_PATH, UCIDateOutOfRange
 from taobao_agent.workflow import main, run_workflow
 
 
 class FakeModel:
-    def __init__(self, intent_type: str, secondary_intents: list[str] | None = None) -> None:
+    def __init__(
+        self, intent_type: str, secondary_intents: list[str] | None = None,
+        metric_name: str = "GMV", curr: str = "2026-10-22",
+    ) -> None:
         self.intent_type = intent_type
         self.secondary_intents = secondary_intents or []
+        self.metric_name = metric_name
+        self.curr = curr
         self.calls: list[list[object]] = []
 
     def invoke(self, messages: list[object]) -> AIMessage:
@@ -36,10 +44,10 @@ class FakeModel:
                     "intent_type": self.intent_type,
                     "secondary_intents": self.secondary_intents,
                     "confidence": 0.9,
-                    "metric_name": "GMV" if self.intent_type != "other" else None,
+                    "metric_name": self.metric_name if self.intent_type != "other" else None,
                     "metric_field": None,
                     "time_label": "昨天" if self.intent_type != "other" else None,
-                    "curr": "2026-10-22" if self.intent_type != "other" else None,
+                    "curr": self.curr if self.intent_type != "other" else None,
                     "prev": None,
                     "scope": None,
                     "dimensions": [],
@@ -132,6 +140,108 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("2026-10-22", result.answer)
         self.assertIn("200.00 元", result.answer)
         self.assertEqual(len(model.calls), 1)
+
+    def test_uci_query_runs_through_existing_graph(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "retail.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.executescript(
+                    "CREATE TABLE retail_lines (invoice_date TEXT, record_type TEXT, line_amount_pence INTEGER);"
+                    "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                    "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-02');"
+                    "INSERT INTO retail_lines VALUES ('2010-12-01', 'positive', 635);"
+                    "INSERT INTO retail_lines VALUES ('2010-12-01', 'cancel', -255);"
+                )
+            model = FakeModel("data_query", metric_name="交易明细金额", curr="2010-12-01")
+            result = run_workflow(
+                "2010-12-01 交易明细金额是多少？", model, date(2026, 10, 25),
+                load_metric_catalog(UCI_CATALOG_PATH), uci_db_path=database_path,
+            )
+
+        self.assertEqual(result.next_expert, "query")
+        self.assertIn("6.35 英镑", result.answer)
+        self.assertIn("不是已支付 GMV", result.answer)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_uci_query_rejects_comparison_and_explains_date_coverage(self) -> None:
+        catalog = load_metric_catalog(UCI_CATALOG_PATH)
+        intent = IntentResult(
+            intent_type="data_query",
+            secondary_intents=[],
+            confidence=0.9,
+            metric_name="交易明细金额",
+            metric_field=None,
+            time_label="2010-12-01",
+            curr="2010-12-01",
+            prev=None,
+            scope=None,
+            dimensions=[],
+        )
+        with patch("taobao_agent.query_agent.query_uci_metric") as query_tool:
+            compared = intent.model_copy(update={"prev": date(2010, 12, 2)})
+            answer = answer_query(compared, catalog, uci_db_path=Path("unused.sqlite"))
+            self.assertIn("无分组", answer)
+            query_tool.assert_not_called()
+
+            query_tool.side_effect = UCIDateOutOfRange("2010-12-01", "2011-12-09")
+            answer = answer_query(intent, catalog, uci_db_path=Path("unused.sqlite"))
+            self.assertIn("2010-12-01 至 2011-12-09", answer)
+            self.assertIn("没有返回数值", answer)
+
+    def test_main_cli_uci_mode_loads_public_metric_and_queries(self) -> None:
+        model = FakeModel("data_query", metric_name="交易明细金额", curr="2010-12-01")
+        output = io.StringIO()
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "retail.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.executescript(
+                    "CREATE TABLE retail_lines (invoice_date TEXT, record_type TEXT, line_amount_pence INTEGER);"
+                    "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                    "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-01');"
+                    "INSERT INTO retail_lines VALUES ('2010-12-01', 'positive', 635);"
+                )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "TAOBAO_UCI_DB_PATH": str(database_path),
+                        "TAOBAO_DEMO_DATA": "0",
+                        "TAOBAO_METRIC_CATALOG_PATH": "",
+                    },
+                ),
+                patch("sys.argv", ["taobao-agent", "2010-12-01 交易明细金额是多少？"]),
+                patch("sys.stdout", output),
+                patch("taobao_agent.workflow.create_qwen_model", return_value=model),
+            ):
+                main()
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["next_expert"], "query")
+        self.assertIn("6.35 英镑", result["answer"])
+        self.assertEqual(len(model.calls), 1)
+
+    def test_main_cli_rejects_missing_uci_database_before_model(self) -> None:
+        stderr = io.StringIO()
+        with TemporaryDirectory() as directory:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "TAOBAO_UCI_DB_PATH": str(Path(directory) / "missing.sqlite"),
+                        "TAOBAO_DEMO_DATA": "0",
+                        "TAOBAO_METRIC_CATALOG_PATH": "",
+                    },
+                ),
+                patch("sys.argv", ["taobao-agent", "2010-12-01 交易明细金额是多少？"]),
+                patch("sys.stderr", stderr),
+                patch("taobao_agent.workflow.create_qwen_model") as create_model,
+            ):
+                with self.assertRaises(SystemExit) as result:
+                    main()
+
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn("数据库文件不存在", stderr.getvalue())
+        create_model.assert_not_called()
 
     def test_demo_data_does_not_run_without_explicit_opt_in(self) -> None:
         result = run_workflow(

@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 在可用时执行专家**。Other 能回复寒暄；Query 会先查指标，明确启用教学数据模式时还能查询项目自带的合成订单。默认没有配置真实指标目录和数据源，所以 Query 会说明无法取数；Analysis 仍只输出交接目标。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 在可用时执行专家**。Other 能回复寒暄；Query 会先查指标，明确启用教学数据模式时可查询合成订单，指定本地 UCI 数据库时可查询公开零售交易明细。默认未启用数据源，所以 Query 会说明无法取数；Analysis 仍只输出交接目标。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
 
 ## 环境与验证
 
@@ -85,7 +85,33 @@ env -u TAOBAO_METRIC_CATALOG_PATH TAOBAO_DEMO_DATA=1 DASHSCOPE_API_KEY="$DASHSCO
 
 `env -u` 只为这一条命令移除可能残留的自定义指标目录；`TAOBAO_DEMO_DATA=1` 也只对这条命令生效。主命令会调用模型一次做意图识别，再由原有 Query 节点查内置样例目录、调用固定 SQL 门禁和只读内存 SQLite。若模型识别为单日 GMV 取数，预期 `answer` 含“教学合成数据”和“200.00 元”。这条命令会发送一次真实模型请求；本项目尚未在当前环境用你的 Key 实测。模型若误判意图或日期，结果可能不同。比较、分组、指定范围以及缺少日期的问题会提示当前教学模式暂不支持。
 
+你随后已在自己的终端用 Plus Key 运行这句固定问题，得到 `next_expert=query` 和“教学合成数据：2026-10-22 的 GMV 为 200.00 元”。这是一条在线成功样例，不代表其他问法可靠。
+
 不设置 `TAOBAO_DEMO_DATA=1` 时仍使用普通模式，不能查询合成订单。教学模式会自动加载 `examples/demo_metrics.json`，不能同时设置自定义 `TAOBAO_METRIC_CATALOG_PATH`；也不会访问外部数据库。具体调用链和测试边界见第 12 课文档。
+
+## 第 13 课：用 UCI 公开数据完成查询
+
+数据来自 [UCI Online Retail](https://archive.ics.uci.edu/dataset/352/online+retail)，许可为 CC BY 4.0。其日期为发票生成日期，只有数量、单价和取消标记，没有支付状态或淘宝补贴字段。本项目的“交易明细金额”口径是：排除取消发票、数量不大于 0、单价不大于 0 的行，再按日期汇总 `数量 × 单价`；它**不是已支付 GMV**。金额单位为英镑，日期范围为 2010-12-01 至 2011-12-09。
+
+若本机 `data/uci_online_retail/` 已有第 13 课导入的文件，直接执行下方查询命令。新克隆仓库时，在项目根目录下载官方数据并导入一次：
+
+```bash
+mkdir -p data/uci_online_retail
+curl -fL 'https://archive.ics.uci.edu/static/public/352/online+retail.zip' -o 'data/uci_online_retail/online+retail.zip'
+unzip -n 'data/uci_online_retail/online+retail.zip' -d data/uci_online_retail
+shasum -a 256 'data/uci_online_retail/Online Retail.xlsx'
+uv run taobao-import-uci 'data/uci_online_retail/Online Retail.xlsx' 'data/uci_online_retail/online_retail.sqlite'
+```
+
+目的：取得官方 Excel、核对文件、导入只保留查询所需字段的 SQLite 副本。我们实际下载的 Excel SHA-256 为 `43465a06f2ccf7c8b5bd2892bc7defb52f97487934fe93b16ae4c3936424676d`；若你下载后的值不同，先核对 UCI 文件版本，不要直接套用本课的数值。导入预期输出：正向明细 530104 行、取消 9288 行、其余 2517 行。导入命令**不会覆盖已有数据库**；再次导入请使用新的目标路径。Excel 和 SQLite 都在被 Git 忽略的 `data/` 下，不会被提交。`openpyxl` 是读取 Excel 的唯一新增依赖；SQLite 属于 Python 标准库，**无需安装数据库服务或 Navicat**。
+
+准备好 Plus Key 后，在同一个终端运行：
+
+```bash
+env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-01 交易明细金额是多少？'
+```
+
+目的：用一次真实模型请求识别问题，再让现有 Query 节点经指标目录、固定 SQL 门禁和只读 SQLite 返回结果。若模型正确识别，预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。我已用固定输出的假模型贯穿真实数据库验证这一结果；本课尚未使用你的 Key 在线验证新问法。单次成功也不能证明其他问法准确；日期超出数据范围时不会把“无数据”说成“0 销售额”。第 13 课文档解释完整调用链与口径。
 
 ## 单独检查 Intent
 

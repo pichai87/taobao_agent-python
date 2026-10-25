@@ -1,0 +1,17 @@
+[
+  {
+    "name": "交易明细金额",
+    "table": "retail_lines",
+    "field": "line_amount_pence",
+    "source": "UCI Online Retail (doi:10.24432/C5BW33)；排除取消、非正数量及非正单价的明细；非支付口径",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "invoice_date",
+      "condition": {
+        "field": "record_type",
+        "value": "positive"
+      },
+      "unit": "pence"
+    }
+  }
+]

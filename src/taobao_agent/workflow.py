@@ -19,6 +19,7 @@ from taobao_agent.model import ChatModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
 from taobao_agent.query_agent import answer_query
 from taobao_agent.supervisor import ExpertName, select_expert
+from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
 
 class WorkflowState(TypedDict):
@@ -39,6 +40,7 @@ def build_workflow(
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
     demo_data: bool = False,
+    uci_db_path: Path | None = None,
 ):
     """Compile the main graph with the available Query and Other branches."""
 
@@ -55,7 +57,11 @@ def build_workflow(
 
     def query_node(state: WorkflowState) -> dict[str, str]:
         intent = IntentResult.model_validate(state["intent"])
-        return {"answer": answer_query(intent, metric_catalog, demo_data=demo_data)}
+        return {
+            "answer": answer_query(
+                intent, metric_catalog, demo_data=demo_data, uci_db_path=uci_db_path
+            )
+        }
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
         return state["next_expert"]
@@ -83,14 +89,15 @@ def run_workflow(
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
     demo_data: bool = False,
+    uci_db_path: Path | None = None,
 ) -> WorkflowResult:
     """Run the active path and return its decision and any available answer."""
 
     if not question.strip():
         raise ValueError("Question must not be empty")
-    state = build_workflow(model, reference_date, metric_catalog, demo_data).invoke(
-        {"question": question.strip()}
-    )
+    state = build_workflow(
+        model, reference_date, metric_catalog, demo_data, uci_db_path
+    ).invoke({"question": question.strip()})
     return WorkflowResult(
         intent=state["intent"], next_expert=state["next_expert"], answer=state.get("answer")
     )
@@ -99,20 +106,28 @@ def run_workflow(
 def main() -> None:
     """Main CLI entry point for the current workflow."""
 
-    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与可选教学数据查询")
+    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与可选本地数据查询")
     parser.add_argument("question", help="输入一个问题")
     args = parser.parse_args()
 
     try:
         catalog_path = os.environ.get("TAOBAO_METRIC_CATALOG_PATH")
+        uci_path_text = os.environ.get("TAOBAO_UCI_DB_PATH")
         demo_setting = os.environ.get("TAOBAO_DEMO_DATA", "0")
         if demo_setting not in {"0", "1"}:
             raise ValueError("TAOBAO_DEMO_DATA 只接受 0 或 1")
         demo_data = demo_setting == "1"
         if demo_data and catalog_path:
             raise ValueError("教学数据模式不能同时设置 TAOBAO_METRIC_CATALOG_PATH")
+        if uci_path_text and (demo_data or catalog_path):
+            raise ValueError("UCI 公开数据模式不能同时启用教学数据或自定义指标目录")
+        uci_db_path = Path(uci_path_text) if uci_path_text else None
+        if uci_db_path is not None and not uci_db_path.is_file():
+            raise ValueError(f"UCI 数据库文件不存在：{uci_db_path}")
         if demo_data:
             metric_catalog = load_metric_catalog(DEMO_CATALOG_PATH)
+        elif uci_db_path is not None:
+            metric_catalog = load_metric_catalog(UCI_CATALOG_PATH)
         else:
             metric_catalog = load_metric_catalog(Path(catalog_path)) if catalog_path else ()
         model = create_qwen_model()
@@ -120,7 +135,9 @@ def main() -> None:
         parser.exit(2, f"{exc}\n")
 
     try:
-        result = run_workflow(args.question, model, date.today(), metric_catalog, demo_data)
+        result = run_workflow(
+            args.question, model, date.today(), metric_catalog, demo_data, uci_db_path
+        )
     except ModelRateLimitError:
         parser.exit(3, "百炼返回 429：当前模型请求受到限流，且规则无法识别该问题。\n")
     print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False))
