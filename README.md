@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 执行专家**。Other 能回复寒暄；Query 查询单日金额；Analysis 在明确启用教学数据或本地 UCI 数据库时比较两个日期的总额、差额和变化率。Analysis 目前不能诊断变化原因。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 执行专家**。Other 能回复寒暄；Query 查询单日金额。对两日比较问题，图先让 Query 取得两天的结构化金额，再交给 Analysis 计算差额和变化率。Analysis 目前不能诊断变化原因。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
 
 ## 环境与验证
 
@@ -123,9 +123,17 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-02 交易明细金额为什么比 2010-12-01 下降？'
 ```
 
-目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再让 Analysis 节点调用两次既有只读查询工具计算差额和变化率。若意图与日期正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。命令会发送一次模型请求；本课只用假模型和本地数据验证过，尚未运行这条新问法的在线调用。若模型日期提取不正确，请反馈不含 Key 的 JSON 结果。一次成功不代表归因可靠。
+目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再由 Query 节点调用两次既有只读查询工具，将结构化数值交给 Analysis 计算差额和变化率。若意图与日期正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。命令会发送一次模型请求；若模型日期提取不正确，请反馈不含 Key 的 JSON 结果。一次成功不代表归因可靠。
 
 Analysis 也可在 `TAOBAO_DEMO_DATA=1` 下比较合成 GMV。当前仅支持同一指标的两个明确日期、无分组和无指定范围；基期金额为零时不会给出无意义的百分比。仍使用 Python 自带 SQLite，无需安装数据库服务或 Navicat。详见[第 14 课](docs/learning/lessons/14-两日金额变化与Analysis节点.md)。
+
+你随后用 Plus Key 实测了上面的 UCI 两日问题：意图为 `attribution`，两个日期正确，回答包含 `下降 11212.41 英镑，变化率 19.02%`。这是第 14 课代码的一条真实在线样例。
+
+## 第 15 课：Query 把取数结果交给 Analysis
+
+第 14 课由 Analysis 直接调用查询工具。现在同一句问题的图内路径改为 **Intent → Supervisor → Query → Analysis**：Query 查询两天，把指标、日期、整数金额、来源和单位写入 `State.query_evidence`；Analysis 只读取这份数据并计算。若 Query 缺少日期、未找到指标或任一次取数失败，图在 Query 结束，不会把半份数据交给 Analysis。`next_expert=analysis` 仍表示 Supervisor 最终选择的分析专家，Query 是它的取数前置步骤。第 15 课的[教学文档](docs/learning/lessons/15-Query到Analysis的结构化交接.md)解释数据流与测试。
+
+要验证新图的真实模型调用，可再次运行本节上方的 UCI 两日命令。**目的**：确认重排后的 Query → Analysis 路径在同一个问法下仍返回原来的正确数值。**预期**：`next_expert=analysis`，`answer` 含 58960.79、47748.38、11212.41 英镑和 19.02%。主命令 JSON 不显示内部 `query_evidence`；教学文档给出本地测试如何检查这个交接。到本课完成时，我们只用假模型贯穿真实数据库验证新路径，尚未再次使用你的 Key 在线运行。一次成功也不能证明所有取数和分析问法可靠。
 
 ## 单独检查 Intent
 

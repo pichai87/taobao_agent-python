@@ -18,7 +18,7 @@ from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
-from taobao_agent.query_agent import answer_query
+from taobao_agent.query_agent import QueryEvidence, answer_query, fetch_comparison
 from taobao_agent.supervisor import ExpertName, select_expert
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
@@ -27,6 +27,7 @@ class WorkflowState(TypedDict):
     question: str
     intent: NotRequired[dict[str, object]]
     next_expert: NotRequired[ExpertName]
+    query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
 
@@ -56,8 +57,15 @@ def build_workflow(
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": answer_other(state["question"])}
 
-    def query_node(state: WorkflowState) -> dict[str, str]:
+    def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
+        if state["next_expert"] == "analysis":
+            result = fetch_comparison(
+                intent, metric_catalog, demo_data=demo_data, uci_db_path=uci_db_path
+            )
+            if isinstance(result, str):
+                return {"answer": result, "query_evidence": None}
+            return {"query_evidence": result.model_dump(mode="json")}
         return {
             "answer": answer_query(
                 intent, metric_catalog, demo_data=demo_data, uci_db_path=uci_db_path
@@ -65,15 +73,16 @@ def build_workflow(
         }
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
-        intent = IntentResult.model_validate(state["intent"])
-        return {
-            "answer": answer_analysis(
-                intent, metric_catalog, demo_data=demo_data, uci_db_path=uci_db_path
-            )
-        }
+        evidence = QueryEvidence.model_validate(state["query_evidence"])
+        return {"answer": answer_analysis(evidence)}
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
         return state["next_expert"]
+
+    def route_after_query(state: WorkflowState) -> str:
+        if state["next_expert"] == "analysis" and state.get("query_evidence") is not None:
+            return "analysis"
+        return "done"
 
     graph = StateGraph(WorkflowState)
     graph.add_node("intent", intent_node)
@@ -86,10 +95,12 @@ def build_workflow(
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
-        {"other": "other", "query": "query", "analysis": "analysis"},
+        {"other": "other", "query": "query", "analysis": "query"},
     )
     graph.add_edge("other", END)
-    graph.add_edge("query", END)
+    graph.add_conditional_edges(
+        "query", route_after_query, {"analysis": "analysis", "done": END}
+    )
     graph.add_edge("analysis", END)
     return graph.compile()
 

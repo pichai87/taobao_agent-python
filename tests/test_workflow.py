@@ -21,8 +21,8 @@ from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import create_qwen_model
 from taobao_agent.query_agent import answer_query
-from taobao_agent.uci_online_retail import UCI_CATALOG_PATH, UCIDateOutOfRange
-from taobao_agent.workflow import main, run_workflow
+from taobao_agent.uci_online_retail import UCI_CATALOG_PATH, UCIDateOutOfRange, UCIQueryError
+from taobao_agent.workflow import build_workflow, main, run_workflow
 
 
 class FakeModel:
@@ -192,6 +192,49 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("下降 20.00 英镑，变化率 20.00%", result.answer)
         self.assertIn("不能判断变化原因", result.answer)
         self.assertEqual(len(model.calls), 1)
+
+    def test_attribution_passes_structured_query_evidence_to_analysis(self) -> None:
+        model = FakeModel("attribution", prev="2026-10-21")
+        updates = list(
+            build_workflow(
+                model, date(2026, 10, 23), load_metric_catalog(DEMO_CATALOG_PATH),
+                demo_data=True,
+            ).stream({"question": "2026-10-22 GMV 比 2026-10-21 下降多少？"})
+        )
+
+        self.assertEqual([next(iter(update)) for update in updates], [
+            "intent", "supervisor", "query", "analysis",
+        ])
+        evidence = updates[2]["query"]["query_evidence"]
+        self.assertEqual(evidence["previous_minor"], 30000)
+        self.assertEqual(evidence["current_minor"], 20000)
+        self.assertNotIn("answer", updates[2]["query"])
+        self.assertIn("下降 100.00 元", updates[3]["analysis"]["answer"])
+        self.assertEqual(len(model.calls), 1)
+
+    def test_failed_comparison_stops_after_query_without_partial_evidence(self) -> None:
+        model = FakeModel(
+            "attribution", metric_name="交易明细金额",
+            prev="2010-12-01", curr="2010-12-02",
+        )
+        with patch(
+            "taobao_agent.query_agent.query_uci_metric",
+            side_effect=[123456, UCIQueryError("private path")],
+        ):
+            updates = list(
+                build_workflow(
+                    model, date(2026, 10, 25), load_metric_catalog(UCI_CATALOG_PATH),
+                    uci_db_path=Path("unused.sqlite"),
+                ).stream({"question": "2010-12-02 交易明细金额为什么下降？"})
+            )
+
+        self.assertEqual([next(iter(update)) for update in updates], [
+            "intent", "supervisor", "query",
+        ])
+        self.assertIsNone(updates[2]["query"]["query_evidence"])
+        self.assertIn("没有返回比较结果", updates[2]["query"]["answer"])
+        self.assertNotIn("1234.56", updates[2]["query"]["answer"])
+        self.assertNotIn("private path", updates[2]["query"]["answer"])
 
     def test_uci_query_rejects_comparison_and_explains_date_coverage(self) -> None:
         catalog = load_metric_catalog(UCI_CATALOG_PATH)
