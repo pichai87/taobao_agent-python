@@ -11,6 +11,7 @@ from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
+from taobao_agent.analysis_agent import answer_analysis
 from taobao_agent.demo_query_tool import DEMO_CATALOG_PATH
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
@@ -42,7 +43,7 @@ def build_workflow(
     demo_data: bool = False,
     uci_db_path: Path | None = None,
 ):
-    """Compile the main graph with the available Query and Other branches."""
+    """Compile the main graph with Query, Analysis, and Other branches."""
 
     def intent_node(state: WorkflowState) -> dict[str, dict[str, object]]:
         intent = run_intent_once(state["question"], model, reference_date)
@@ -63,6 +64,14 @@ def build_workflow(
             )
         }
 
+    def analysis_node(state: WorkflowState) -> dict[str, str]:
+        intent = IntentResult.model_validate(state["intent"])
+        return {
+            "answer": answer_analysis(
+                intent, metric_catalog, demo_data=demo_data, uci_db_path=uci_db_path
+            )
+        }
+
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
         return state["next_expert"]
 
@@ -71,15 +80,17 @@ def build_workflow(
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("other", other_node)
     graph.add_node("query", query_node)
+    graph.add_node("analysis", analysis_node)
     graph.add_edge(START, "intent")
     graph.add_edge("intent", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
-        {"other": "other", "query": "query", "analysis": END},
+        {"other": "other", "query": "query", "analysis": "analysis"},
     )
     graph.add_edge("other", END)
     graph.add_edge("query", END)
+    graph.add_edge("analysis", END)
     return graph.compile()
 
 
@@ -91,7 +102,7 @@ def run_workflow(
     demo_data: bool = False,
     uci_db_path: Path | None = None,
 ) -> WorkflowResult:
-    """Run the active path and return its decision and any available answer."""
+    """Run the active path and return the selected expert's answer."""
 
     if not question.strip():
         raise ValueError("Question must not be empty")
@@ -106,7 +117,7 @@ def run_workflow(
 def main() -> None:
     """Main CLI entry point for the current workflow."""
 
-    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与可选本地数据查询")
+    parser = argparse.ArgumentParser(description="电商分析 Agent：意图识别、专家选择与可选本地数据查询和比较")
     parser.add_argument("question", help="输入一个问题")
     args = parser.parse_args()
 

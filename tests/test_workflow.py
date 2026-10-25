@@ -28,12 +28,13 @@ from taobao_agent.workflow import main, run_workflow
 class FakeModel:
     def __init__(
         self, intent_type: str, secondary_intents: list[str] | None = None,
-        metric_name: str = "GMV", curr: str = "2026-10-22",
+        metric_name: str = "GMV", curr: str = "2026-10-22", prev: str | None = None,
     ) -> None:
         self.intent_type = intent_type
         self.secondary_intents = secondary_intents or []
         self.metric_name = metric_name
         self.curr = curr
+        self.prev = prev
         self.calls: list[list[object]] = []
 
     def invoke(self, messages: list[object]) -> AIMessage:
@@ -48,7 +49,7 @@ class FakeModel:
                     "metric_field": None,
                     "time_label": "昨天" if self.intent_type != "other" else None,
                     "curr": self.curr if self.intent_type != "other" else None,
-                    "prev": None,
+                    "prev": self.prev,
                     "scope": None,
                     "dimensions": [],
                 },
@@ -87,7 +88,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.intent.intent_type, "attribution")
         self.assertEqual(result.next_expert, "analysis")
-        self.assertIsNone(result.answer)
+        self.assertIn("两个不同的明确日期", result.answer)
         self.assertEqual(len(model.calls), 1)
         self.assertIsInstance(model.calls[0][0], SystemMessage)
         self.assertIsInstance(model.calls[0][1], HumanMessage)
@@ -161,6 +162,35 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result.next_expert, "query")
         self.assertIn("6.35 英镑", result.answer)
         self.assertIn("不是已支付 GMV", result.answer)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_uci_two_day_comparison_runs_through_analysis_node(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "retail.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.executescript(
+                    "CREATE TABLE retail_lines (invoice_date TEXT, record_type TEXT, line_amount_pence INTEGER);"
+                    "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                    "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-02');"
+                    "INSERT INTO retail_lines VALUES ('2010-12-01', 'positive', 10000);"
+                    "INSERT INTO retail_lines VALUES ('2010-12-02', 'positive', 8000);"
+                    "INSERT INTO retail_lines VALUES ('2010-12-02', 'cancel', -5000);"
+                )
+            model = FakeModel(
+                "attribution", metric_name="交易明细金额",
+                curr="2010-12-02", prev="2010-12-01",
+            )
+            result = run_workflow(
+                "2010-12-02 交易明细金额为什么比 2010-12-01 下降？",
+                model, date(2026, 10, 25), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=database_path,
+            )
+
+        self.assertEqual(result.next_expert, "analysis")
+        self.assertIn("2010-12-01 的交易明细金额为 100.00 英镑", result.answer)
+        self.assertIn("2010-12-02 为 80.00 英镑", result.answer)
+        self.assertIn("下降 20.00 英镑，变化率 20.00%", result.answer)
+        self.assertIn("不能判断变化原因", result.answer)
         self.assertEqual(len(model.calls), 1)
 
     def test_uci_query_rejects_comparison_and_explains_date_coverage(self) -> None:
@@ -369,7 +399,7 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(result.intent.source, "rule")
         self.assertEqual(result.next_expert, "analysis")
-        self.assertIsNone(result.answer)
+        self.assertIn("尚未配置 GMV", result.answer)
         self.assertEqual(model.calls, 1)
 
     def test_empty_question_stops_before_model_call(self) -> None:
@@ -392,7 +422,7 @@ class WorkflowTest(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["next_expert"], "analysis")
         self.assertEqual(result["intent"]["intent_type"], "attribution")
-        self.assertIsNone(result["answer"])
+        self.assertIn("两个不同的明确日期", result["answer"])
         self.assertEqual(len(model.calls), 1)
 
     def test_main_cli_prints_other_answer(self) -> None:

@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 在可用时执行专家**。Other 能回复寒暄；Query 会先查指标，明确启用教学数据模式时可查询合成订单，指定本地 UCI 数据库时可查询公开零售交易明细。默认未启用数据源，所以 Query 会说明无法取数；Analysis 仍只输出交接目标。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择下一位专家 → 执行专家**。Other 能回复寒暄；Query 查询单日金额；Analysis 在明确启用教学数据或本地 UCI 数据库时比较两个日期的总额、差额和变化率。Analysis 目前不能诊断变化原因。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
 
 ## 环境与验证
 
@@ -35,7 +35,7 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 ## 主命令做什么
 
-上面的 `taobao-agent` 命令只调用模型**一次**：先得到意图 JSON，再由 Supervisor 在程序内部按意图选专家。例子中的主意图应是 `attribution`，`next_expert` 应是 `analysis`，`answer` 应为 `null`，因为 Analysis 尚未接入。这不会真的分析 GMV 为什么下降。
+上面的 `taobao-agent` 命令只调用模型**一次**：先得到意图 JSON，再由 Supervisor 在程序内部按意图选专家。例子中的主意图应是 `attribution`，`next_expert` 应是 `analysis`；未启用教学或 UCI 数据源时，`answer` 会说明缺少指标定义或可查询的数据源，不会猜测 GMV 下降原因。
 
 目前的对应关系：取数或查表结构 → `query`；波动归因 → `analysis`；其他问题 → `other`。原文还有 Ops 专家，但当前没有对应的已验证意图类型，因此暂不分配给 Ops。
 
@@ -112,6 +112,20 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 ```
 
 目的：用一次真实模型请求识别问题，再让现有 Query 节点经指标目录、固定 SQL 门禁和只读 SQLite 返回结果。若模型正确识别，预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。我已用固定输出的假模型贯穿真实数据库验证这一结果；本课尚未使用你的 Key 在线验证新问法。单次成功也不能证明其他问法准确；日期超出数据范围时不会把“无数据”说成“0 销售额”。第 13 课文档解释完整调用链与口径。
+
+你随后用 Plus Key 实际运行了这条命令，得到 `next_expert=query` 和 `58960.79 英镑`。这是该问法的一次真实调用验证，不能代表其他问法都能正确识别。
+
+## 第 14 课：两个日期的金额变化
+
+已有第 13 课的本地数据库且已在同一个终端准备 Plus Key 时，运行：
+
+```bash
+env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-02 交易明细金额为什么比 2010-12-01 下降？'
+```
+
+目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再让 Analysis 节点调用两次既有只读查询工具计算差额和变化率。若意图与日期正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。命令会发送一次模型请求；本课只用假模型和本地数据验证过，尚未运行这条新问法的在线调用。若模型日期提取不正确，请反馈不含 Key 的 JSON 结果。一次成功不代表归因可靠。
+
+Analysis 也可在 `TAOBAO_DEMO_DATA=1` 下比较合成 GMV。当前仅支持同一指标的两个明确日期、无分组和无指定范围；基期金额为零时不会给出无意义的百分比。仍使用 Python 自带 SQLite，无需安装数据库服务或 Navicat。详见[第 14 课](docs/learning/lessons/14-两日金额变化与Analysis节点.md)。
 
 ## 单独检查 Intent
 
