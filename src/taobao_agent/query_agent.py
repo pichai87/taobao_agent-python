@@ -4,13 +4,20 @@ from datetime import date
 from pathlib import Path
 from typing import Literal, Sequence
 
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from taobao_agent.demo_query_tool import DemoQueryError, query_demo_metric
+from taobao_agent.daily_metric_tool import (
+    DailyMetricValue,
+    MetricNotApprovedError,
+    MetricNotFoundError,
+    make_daily_metric_tool,
+)
+from taobao_agent.demo_query_tool import DemoQueryError
 from taobao_agent.harness import ToolUnavailableError, guarded_metric_search
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_search import MetricDefinition
-from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError, query_uci_metric
+from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError
 
 
 class QueryEvidence(BaseModel):
@@ -31,6 +38,17 @@ class QueryEvidence(BaseModel):
         if (self.source, self.unit) not in {("demo", "fen"), ("uci", "pence")}:
             raise ValueError("query evidence source and unit do not match")
         return self
+
+
+def _query_day(daily_tool: BaseTool, metric_name: str, business_date: date) -> DailyMetricValue:
+    """Invoke the bounded tool and validate its structured response."""
+
+    value = DailyMetricValue.model_validate(daily_tool.invoke({
+        "metric_name": metric_name, "business_date": business_date.isoformat(),
+    }))
+    if value.metric_name != metric_name or value.business_date != business_date:
+        raise MetricNotApprovedError("工具返回的指标或日期与请求不一致")
+    return value
 
 
 def fetch_comparison(
@@ -59,32 +77,34 @@ def fetch_comparison(
         if metric.name != "GMV" or metric.calculation is None or metric.calculation.unit != "fen":
             return "教学数据模式目前只支持已配置完整规则、单位为分的 GMV 比较。"
         try:
-            previous = query_demo_metric(metric, intent.prev)
-            current = query_demo_metric(metric, intent.curr)
-        except DemoQueryError:
+            daily_tool = make_daily_metric_tool(catalog, demo_data=True)
+            previous_result = _query_day(daily_tool, metric.name, intent.prev)
+            current_result = _query_day(daily_tool, metric.name, intent.curr)
+        except (DemoQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
             return "教学数据比较查询未通过校验或执行失败；当前没有返回比较结果。"
-        source: Literal["demo", "uci"] = "demo"
-        unit: Literal["fen", "pence"] = "fen"
     elif uci_db_path is not None:
         if metric.name != "交易明细金额" or metric.calculation is None or metric.calculation.unit != "pence":
             return "UCI 公开数据模式目前只支持交易明细金额比较。"
         try:
-            previous = query_uci_metric(metric, intent.prev, uci_db_path)
-            current = query_uci_metric(metric, intent.curr, uci_db_path)
+            daily_tool = make_daily_metric_tool(catalog, uci_db_path=uci_db_path)
+            previous_result = _query_day(daily_tool, metric.name, intent.prev)
+            current_result = _query_day(daily_tool, metric.name, intent.curr)
         except UCIDateOutOfRange as exc:
             return f"UCI Online Retail 数据日期仅覆盖 {exc.first_date} 至 {exc.last_date}；当前没有返回比较结果。"
-        except UCIQueryError:
+        except (UCIQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
             return "UCI 公开数据比较查询未通过校验或执行失败；当前没有返回比较结果。"
-        source = "uci"
-        unit = "pence"
     else:
         return "已找到指标定义，但当前没有启用可查询的数据源；无法比较两个日期的数值。"
 
-    if previous < 0 or current < 0:
-        return "查询结果不是可比较的非负金额；当前没有返回比较结果。"
+    if (previous_result.source, previous_result.unit) != (
+        current_result.source, current_result.unit
+    ):
+        return "两次查询的来源或单位不一致；当前没有返回比较结果。"
     return QueryEvidence(
         metric_name=metric.name, prev=intent.prev, curr=intent.curr,
-        previous_minor=previous, current_minor=current, source=source, unit=unit,
+        previous_minor=previous_result.amount_minor,
+        current_minor=current_result.amount_minor,
+        source=previous_result.source, unit=previous_result.unit,
     )
 
 
@@ -116,10 +136,11 @@ def answer_query(
         if intent.prev is not None or intent.scope or intent.dimensions or intent.secondary_intents:
             return "教学数据模式目前只支持单日、无分组的 GMV 查询；当前没有执行查询。"
         try:
-            amount_fen = query_demo_metric(metric, intent.curr)
-        except DemoQueryError:
+            daily_tool = make_daily_metric_tool(catalog, demo_data=True)
+            result = _query_day(daily_tool, metric.name, intent.curr)
+        except (DemoQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
             return "教学数据查询未通过校验或执行失败；当前没有返回数值。"
-        amount_yuan = f"{amount_fen // 100}.{amount_fen % 100:02d}"
+        amount_yuan = f"{result.amount_minor // 100}.{result.amount_minor % 100:02d}"
         return f"教学合成数据：{intent.curr.isoformat()} 的 GMV 为 {amount_yuan} 元。"
 
     if uci_db_path is not None and intent.intent_type == "data_query":
@@ -132,12 +153,13 @@ def answer_query(
         if intent.prev is not None or intent.scope or intent.dimensions or intent.secondary_intents:
             return "UCI 公开数据模式目前只支持单日、无分组的交易明细金额查询；当前没有执行查询。"
         try:
-            amount_pence = query_uci_metric(metric, intent.curr, uci_db_path)
+            daily_tool = make_daily_metric_tool(catalog, uci_db_path=uci_db_path)
+            result = _query_day(daily_tool, metric.name, intent.curr)
         except UCIDateOutOfRange as exc:
             return f"UCI Online Retail 数据日期仅覆盖 {exc.first_date} 至 {exc.last_date}；当前没有返回数值。"
-        except UCIQueryError:
+        except (UCIQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
             return "UCI 公开数据查询未通过校验或执行失败；当前没有返回数值。"
-        amount_pounds = f"{amount_pence // 100}.{amount_pence % 100:02d}"
+        amount_pounds = f"{result.amount_minor // 100}.{result.amount_minor % 100:02d}"
         return (
             f"UCI Online Retail 公开数据：{intent.curr.isoformat()} 的交易明细金额为 "
             f"{amount_pounds} 英镑（排除取消、非正数量和非正单价；不是已支付 GMV）。"

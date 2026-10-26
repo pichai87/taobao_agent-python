@@ -218,7 +218,7 @@ class WorkflowTest(unittest.TestCase):
             prev="2010-12-01", curr="2010-12-02",
         )
         with patch(
-            "taobao_agent.query_agent.query_uci_metric",
+            "taobao_agent.daily_metric_tool.query_uci_metric",
             side_effect=[123456, UCIQueryError("private path")],
         ):
             updates = list(
@@ -250,7 +250,7 @@ class WorkflowTest(unittest.TestCase):
             scope=None,
             dimensions=[],
         )
-        with patch("taobao_agent.query_agent.query_uci_metric") as query_tool:
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query_tool:
             compared = intent.model_copy(update={"prev": date(2010, 12, 2)})
             answer = answer_query(compared, catalog, uci_db_path=Path("unused.sqlite"))
             self.assertIn("无分组", answer)
@@ -341,7 +341,7 @@ class WorkflowTest(unittest.TestCase):
             scope=None,
             dimensions=[],
         )
-        with patch("taobao_agent.query_agent.query_demo_metric") as query_tool:
+        with patch("taobao_agent.daily_metric_tool.query_demo_metric") as query_tool:
             self.assertIn("明确的查询日期", answer_query(intent, catalog, demo_data=True))
             grouped = intent.model_copy(
                 update={"curr": date(2026, 10, 22), "dimensions": ["行业"]}
@@ -355,7 +355,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_demo_query_hides_internal_tool_failure(self) -> None:
         with patch(
-            "taobao_agent.query_agent.query_demo_metric",
+            "taobao_agent.daily_metric_tool.query_demo_metric",
             side_effect=DemoQueryError("private demo file path"),
         ):
             result = run_workflow(
@@ -368,6 +368,20 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertIn("教学数据查询未通过校验", result.answer)
         self.assertNotIn("private demo file path", result.answer)
+
+    def test_query_rejects_tool_value_for_a_different_date(self) -> None:
+        with patch("taobao_agent.query_agent.make_daily_metric_tool") as make_tool:
+            make_tool.return_value.invoke.return_value = {
+                "metric_name": "GMV", "business_date": "2026-10-21",
+                "amount_minor": 20000, "source": "demo", "unit": "fen",
+            }
+            result = run_workflow(
+                "2026-10-22 GMV 多少？", FakeModel("data_query"), date(2026, 10, 23),
+                load_metric_catalog(DEMO_CATALOG_PATH), demo_data=True,
+            )
+
+        self.assertIn("查询未通过校验", result.answer)
+        self.assertNotIn("200.00 元", result.answer)
 
     def test_query_does_not_guess_from_an_unrelated_definition(self) -> None:
         model = FakeModel("data_query")

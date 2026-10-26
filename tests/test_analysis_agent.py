@@ -27,7 +27,7 @@ class AnalysisAgentTest(unittest.TestCase):
         self.path = Path("unused.sqlite")
 
     def test_zero_baseline_has_no_percentage(self) -> None:
-        with patch("taobao_agent.query_agent.query_uci_metric", side_effect=[0, 125]) as query:
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric", side_effect=[0, 125]) as query:
             evidence = fetch_comparison(intent(), self.catalog, uci_db_path=self.path)
         self.assertIsInstance(evidence, QueryEvidence)
         answer = answer_analysis(evidence)
@@ -37,7 +37,7 @@ class AnalysisAgentTest(unittest.TestCase):
         self.assertEqual(query.call_count, 2)
 
     def test_missing_date_or_dimension_does_not_query(self) -> None:
-        with patch("taobao_agent.query_agent.query_uci_metric") as query:
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query:
             missing = fetch_comparison(
                 intent().model_copy(update={"prev": None}), self.catalog, uci_db_path=self.path
             )
@@ -51,7 +51,7 @@ class AnalysisAgentTest(unittest.TestCase):
 
     def test_second_query_failure_does_not_leak_first_amount(self) -> None:
         with patch(
-            "taobao_agent.query_agent.query_uci_metric",
+            "taobao_agent.daily_metric_tool.query_uci_metric",
             side_effect=[123456, UCIQueryError("private database path")],
         ):
             answer = fetch_comparison(intent(), self.catalog, uci_db_path=self.path)
@@ -61,7 +61,7 @@ class AnalysisAgentTest(unittest.TestCase):
 
     def test_out_of_range_reports_coverage_without_amount(self) -> None:
         with patch(
-            "taobao_agent.query_agent.query_uci_metric",
+            "taobao_agent.daily_metric_tool.query_uci_metric",
             side_effect=UCIDateOutOfRange("2010-12-01", "2011-12-09"),
         ):
             answer = fetch_comparison(intent(), self.catalog, uci_db_path=self.path)
