@@ -23,6 +23,18 @@
     }
   },
   {
+    "id": "three_date_amount_trend",
+    "question": "比较 2010-12-01、2010-12-02、2010-12-03 的交易明细金额变化",
+    "reference_date": "2026-06-15",
+    "expected": {
+      "intent_type": "attribution",
+      "metric_name": "交易明细金额",
+      "prev": "2010-12-01",
+      "curr": "2010-12-03",
+      "dates": ["2010-12-01", "2010-12-02", "2010-12-03"]
+    }
+  },
+  {
     "id": "industry_dimension",
     "question": "按行业看昨天的 GMV",
     "reference_date": "2026-06-15",

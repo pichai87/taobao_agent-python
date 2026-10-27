@@ -29,6 +29,7 @@ class IntentResult(BaseModel):
     time_label: str | None
     curr: date | None
     prev: date | None
+    dates: list[date] = Field(default_factory=list)
     scope: str | None
     dimensions: list[str]
     source: Literal["llm", "rule"] = "llm"
@@ -45,6 +46,16 @@ class IntentResult(BaseModel):
             raise ValueError("date must be an ISO YYYY-MM-DD string")
         return parsed
 
+    @field_validator("dates", mode="before")
+    @classmethod
+    def require_iso_dates(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("dates must be a list of ISO YYYY-MM-DD strings")
+        for item in value:
+            if not isinstance(item, str) or date.fromisoformat(item).isoformat() != item:
+                raise ValueError("dates must contain ISO YYYY-MM-DD strings")
+        return value
+
     @field_validator("metric_field")
     @classmethod
     def reject_unverified_field(cls, value: str | None) -> None:
@@ -58,7 +69,23 @@ class IntentResult(BaseModel):
             raise ValueError("secondary_intents contains duplicates")
         if self.intent_type in self.secondary_intents:
             raise ValueError("primary intent cannot also be secondary")
+        if len(set(self.dates)) != len(self.dates):
+            raise ValueError("dates contains duplicates")
+        if self.dates:
+            if self.prev is not None and self.dates[0] != self.prev:
+                raise ValueError("prev must match the first requested date")
+            if self.curr is not None and self.dates[-1] != self.curr:
+                raise ValueError("curr must match the last requested date")
         return self
+
+    def requested_dates(self) -> tuple[date, ...]:
+        """Keep the learned curr/prev contract while allowing longer date series."""
+
+        if self.dates:
+            return tuple(self.dates)
+        if self.prev is not None and self.curr is not None:
+            return self.prev, self.curr
+        return (self.curr,) if self.curr is not None else ()
 
 
 def run_intent_once(question: str, model: ChatModel, reference_date: date) -> IntentResult:
@@ -69,14 +96,16 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date) -> In
     system_prompt = (
         "你是电商数据分析助手的意图识别入口。只输出一个 JSON 对象，不回答问题，不编造数据。"
         "字段必须恰好为 intent_type, secondary_intents, confidence, metric_name, "
-        "metric_field, time_label, curr, prev, scope, dimensions。"
+        "metric_field, time_label, curr, prev, dates, scope, dimensions。"
         "intent_type 和 secondary_intents 只允许 data_query（取数）、attribution（波动归因）、"
         "table_meta（表结构）、other（其他）。主意图放 intent_type；只有明确的第二任务才放入"
         "secondary_intents，否则给空数组。confidence 为 0 到 1 的数字。"
         "metric_name 写用户提到的业务指标名称；没有则为 null。当前没有语义模型，"
         "metric_field 必须为 null，不能猜测数据库字段。"
-        "time_label 保留用户的时间表述；curr 是主查询日期，prev 是比较日期；"
-        "日期用 YYYY-MM-DD 字符串，没有明确或可解析的日期就填 null。"
+        "time_label 保留用户的时间表述；curr 是主查询或最后一个日期，prev 是比较基准日期；"
+        "dates 按比较基准到最终日期列出用户明确要求的所有日期，单日或双日也可以列出；"
+        "若 dates 非空，首项须与非空 prev 一致，末项须与非空 curr 一致。"
+        "日期用 YYYY-MM-DD 字符串，没有明确或可解析的日期就填 null，dates 没有则为空数组。"
         "scope 只写用户明确指定的范围，否则为 null。dimensions 是用户明确要求的分组维度数组，"
         "没有则为空数组。其他缺失字段均用 null。"
         f"今天的参考日期是 {reference_date.isoformat()}，用于解析昨天、前天等相对日期。"
@@ -127,6 +156,7 @@ def rule_fallback(question: str, reference_date: date) -> IntentResult | None:
         time_label=time_label,
         curr=(reference_date - timedelta(days=1)).isoformat(),
         prev=prev.isoformat() if prev is not None else None,
+        dates=[],
         scope=None,
         dimensions=dimensions,
         source="rule",

@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import sqlite3
 import unittest
 from contextlib import closing
@@ -13,7 +14,7 @@ from typing import Sequence
 from unittest.mock import patch
 
 from langchain_core.exceptions import ModelRateLimitError
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_catalog import load_metric_catalog
@@ -28,29 +29,40 @@ class FakeModel:
     def __init__(
         self, intent_type: str, secondary_intents: list[str] | None = None,
         metric_name: str = "GMV", curr: str = "2026-10-22", prev: str | None = None,
+        dates: list[str] | None = None,
     ) -> None:
         self.intent_type = intent_type
         self.secondary_intents = secondary_intents or []
         self.metric_name = metric_name
         self.curr = curr
         self.prev = prev
+        self.dates = dates or []
         self.calls: list[list[object]] = []
         self.tool_requests: list[list[object]] = []
 
     def bind_tools(self, tools: list[object], *, tool_choice: str = "auto") -> "FakeModel":
-        self.asserted_tool_name = tools[0].name
+        self.asserted_tool_names = [item.name for item in tools]
         return self
 
     def invoke(self, messages: list[object]) -> AIMessage:
         if isinstance(messages[0], SystemMessage) and "取数专家" in messages[0].content:
             self.tool_requests.append(messages)
-            target = messages[1].content.split("本次应查询：", 1)[1].rstrip("。")
-            metric_name, business_date = target.split("，", 1)
+            task = messages[1].content.split("已核准任务：指标 ", 1)[1]
+            metric_name = task.split("；日期 ", 1)[0]
+            dates = re.findall(r"\d{4}-\d{2}-\d{2}", task.split("；日期 ", 1)[1])
+            if not any(isinstance(item, ToolMessage) for item in messages):
+                return AIMessage(content="", tool_calls=[{
+                    "name": "search_metrics", "args": {"metric_name": metric_name}, "id": "search-1",
+                }])
+            queried = {
+                json.loads(item.content)["business_date"]
+                for item in messages if isinstance(item, ToolMessage) and "amount_minor" in item.content
+            }
             return AIMessage(content="", tool_calls=[{
-                "name": self.asserted_tool_name,
-                "args": {"metric_name": metric_name, "business_date": business_date},
-                "id": f"call-{len(self.tool_requests)}",
-            }])
+                "name": "query_daily_metric",
+                "args": {"metric_name": metric_name, "business_date": day},
+                "id": f"daily-{day}",
+            } for day in dates if day not in queried])
         self.calls.append(messages)
         return AIMessage(
             content=json.dumps(
@@ -63,6 +75,7 @@ class FakeModel:
                     "time_label": "昨天" if self.intent_type != "other" else None,
                     "curr": self.curr if self.intent_type != "other" else None,
                     "prev": self.prev,
+                    "dates": self.dates,
                     "scope": None,
                     "dimensions": [],
                 },
@@ -192,7 +205,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("不能判断变化原因", result.answer)
         self.assertEqual(len(model.calls), 1)
 
-    def test_explicit_user_amounts_go_directly_to_analysis(self) -> None:
+    def test_user_claimed_amounts_are_checked_against_data_source(self) -> None:
         model = FakeModel(
             "attribution", metric_name="交易明细金额",
             curr="2010-12-02", prev="2010-12-01",
@@ -201,24 +214,22 @@ class WorkflowTest(unittest.TestCase):
             "2010-12-01 的交易明细金额为 58960.79 英镑，"
             "2010-12-02 的交易明细金额为 47748.38 英镑，为什么下降？"
         )
-        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as database_query:
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric", side_effect=[10000, 8000]) as database_query:
             updates = list(build_workflow(
                 model, date(2026, 10, 27), load_metric_catalog(UCI_CATALOG_PATH),
                 uci_db_path=Path("unused.sqlite"), query_model=model,
             ).stream({"question": question}))
 
         self.assertEqual([next(iter(update)) for update in updates], [
-            "intent", "supervisor", "analysis",
+            "intent", "supervisor", "query", "analysis",
         ])
-        evidence = updates[1]["supervisor"]["analysis_evidence"]
-        self.assertEqual(evidence["source"], "user")
-        self.assertEqual(evidence["previous_minor"], 5896079)
-        self.assertEqual(evidence["current_minor"], 4774838)
-        self.assertIn("未经数据库核实", updates[2]["analysis"]["answer"])
-        self.assertIn("下降 11212.41 英镑，变化率 19.02%", updates[2]["analysis"]["answer"])
+        evidence = updates[2]["query"]["query_evidence"]
+        self.assertEqual([value["amount_minor"] for value in evidence["values"]], [10000, 8000])
+        self.assertIn("下降 20.00 英镑", updates[3]["analysis"]["answer"])
+        self.assertNotIn("58960.79", updates[3]["analysis"]["answer"])
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(model.tool_requests, [])
-        database_query.assert_not_called()
+        self.assertEqual(len(model.tool_requests), 2)
+        self.assertEqual(database_query.call_count, 2)
 
     def test_ambiguous_user_amounts_do_not_skip_query(self) -> None:
         model = FakeModel(
@@ -233,7 +244,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([next(iter(update)) for update in updates], [
             "intent", "supervisor", "query",
         ])
-        self.assertNotIn("analysis_evidence", updates[1]["supervisor"])
+        self.assertNotIn("query_evidence", updates[1]["supervisor"])
         self.assertIn("尚未配置 GMV", updates[2]["query"]["answer"])
 
     def test_uci_comparison_asks_model_for_two_bounded_tool_calls(self) -> None:
@@ -253,6 +264,56 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(query.call_count, 2)
         self.assertIn("下降 20.00 英镑", result.answer)
 
+    def test_three_dates_flow_through_one_query_and_analysis_handoff(self) -> None:
+        model = FakeModel(
+            "attribution", metric_name="交易明细金额", curr="2010-12-03",
+            prev="2010-12-01", dates=["2010-12-01", "2010-12-02", "2010-12-03"],
+        )
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric", side_effect=[10000, 8000, 9000]) as query:
+            updates = list(build_workflow(
+                model, date(2026, 10, 27), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=Path("unused.sqlite"), query_model=model,
+            ).stream({"question": "比较 2010-12-01、2010-12-02、2010-12-03 的交易明细金额"}))
+
+        self.assertEqual([next(iter(update)) for update in updates], [
+            "intent", "supervisor", "query", "analysis",
+        ])
+        evidence = updates[2]["query"]["query_evidence"]
+        self.assertEqual([value["amount_minor"] for value in evidence["values"]], [10000, 8000, 9000])
+        self.assertEqual(query.call_count, 3)
+        self.assertIn("首末下降 10.00 英镑，变化率 10.00%", updates[3]["analysis"]["answer"])
+
+    def test_multi_date_data_query_returns_each_observed_amount(self) -> None:
+        model = FakeModel(
+            "data_query", metric_name="交易明细金额", curr="2010-12-03",
+            prev="2010-12-01", dates=["2010-12-01", "2010-12-02", "2010-12-03"],
+        )
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric", side_effect=[10000, 8000, 9000]) as query:
+            result = run_workflow(
+                "查询 2010-12-01、2010-12-02、2010-12-03 的交易明细金额",
+                model, date(2026, 10, 27), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=Path("unused.sqlite"), query_model=model,
+            )
+
+        self.assertEqual(result.next_expert, "query")
+        for amount in ("100.00", "80.00", "90.00"):
+            self.assertIn(amount, result.answer)
+        self.assertEqual(query.call_count, 3)
+
+    def test_explicit_middle_date_cannot_be_silently_dropped(self) -> None:
+        model = FakeModel(
+            "attribution", metric_name="交易明细金额",
+            curr="2010-12-03", prev="2010-12-01", dates=[],
+        )
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query:
+            result = run_workflow(
+                "比较2010-12-01、2010-12-02、2010-12-03的交易明细金额变化",
+                model, date(2026, 10, 27), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=Path("unused.sqlite"), query_model=model,
+            )
+        self.assertIn("明确写出的日期不一致", result.answer)
+        query.assert_not_called()
+
     def test_attribution_passes_structured_query_evidence_to_analysis(self) -> None:
         model = FakeModel(
             "attribution", metric_name="交易明细金额",
@@ -269,10 +330,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([next(iter(update)) for update in updates], [
             "intent", "supervisor", "query", "analysis",
         ])
-        evidence = updates[2]["query"]["analysis_evidence"]
-        self.assertEqual(evidence["previous_minor"], 10000)
-        self.assertEqual(evidence["current_minor"], 8000)
-        self.assertEqual(evidence["source"], "uci")
+        evidence = updates[2]["query"]["query_evidence"]
+        self.assertEqual([value["amount_minor"] for value in evidence["values"]], [10000, 8000])
+        self.assertEqual(evidence["values"][0]["source"], "uci")
         self.assertNotIn("answer", updates[2]["query"])
         self.assertIn("下降 20.00 英镑", updates[3]["analysis"]["answer"])
         self.assertEqual(len(model.calls), 1)
@@ -290,14 +350,14 @@ class WorkflowTest(unittest.TestCase):
                 build_workflow(
                     model, date(2026, 10, 25), load_metric_catalog(UCI_CATALOG_PATH),
                     uci_db_path=Path("unused.sqlite"),
-                ).stream({"question": "2010-12-02 交易明细金额为什么下降？"})
+                ).stream({"question": "2010-12-02 交易明细金额为什么比 2010-12-01 下降？"})
             )
 
         self.assertEqual([next(iter(update)) for update in updates], [
             "intent", "supervisor", "query",
         ])
-        self.assertIsNone(updates[2]["query"]["analysis_evidence"])
-        self.assertIn("没有返回比较结果", updates[2]["query"]["answer"])
+        self.assertIsNone(updates[2]["query"]["query_evidence"])
+        self.assertIn("没有返回数值", updates[2]["query"]["answer"])
         self.assertNotIn("1234.56", updates[2]["query"]["answer"])
         self.assertNotIn("private path", updates[2]["query"]["answer"])
 
@@ -318,7 +378,7 @@ class WorkflowTest(unittest.TestCase):
         with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query_tool:
             compared = intent.model_copy(update={"prev": date(2010, 12, 2)})
             answer = answer_query(compared, catalog, uci_db_path=Path("unused.sqlite"))
-            self.assertIn("无分组", answer)
+            self.assertIn("按时间递增", answer)
             query_tool.assert_not_called()
 
             query_tool.side_effect = UCIDateOutOfRange("2010-12-01", "2011-12-09")
@@ -356,7 +416,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result["next_expert"], "query")
         self.assertIn("6.35 英镑", result["answer"])
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(len(model.tool_requests), 1)
+        self.assertEqual(len(model.tool_requests), 2)
 
     def test_main_cli_rejects_missing_uci_database_before_model(self) -> None:
         stderr = io.StringIO()
@@ -402,7 +462,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("只支持交易明细金额", result.answer)
         query.assert_not_called()
 
-    def test_uci_query_requires_a_supported_single_day_question(self) -> None:
+    def test_uci_query_requires_dates_and_rejects_unavailable_dimensions(self) -> None:
         catalog = load_metric_catalog(UCI_CATALOG_PATH)
         intent = IntentResult(
             intent_type="data_query",
@@ -421,11 +481,7 @@ class WorkflowTest(unittest.TestCase):
             grouped = intent.model_copy(
                 update={"curr": date(2010, 12, 1), "dimensions": ["国家"]}
             )
-            self.assertIn("无分组", answer_query(grouped, catalog, uci_db_path=Path("unused.sqlite")))
-            compared = intent.model_copy(
-                update={"curr": date(2010, 12, 2), "prev": date(2010, 12, 1)}
-            )
-            self.assertIn("单日", answer_query(compared, catalog, uci_db_path=Path("unused.sqlite")))
+            self.assertIn("分组", answer_query(grouped, catalog, uci_db_path=Path("unused.sqlite")))
             query_tool.assert_not_called()
 
     def test_uci_query_hides_internal_tool_failure(self) -> None:
@@ -457,7 +513,7 @@ class WorkflowTest(unittest.TestCase):
                 uci_db_path=Path("unused.sqlite"),
             )
 
-        self.assertIn("查询未通过校验", result.answer)
+        self.assertIn("未通过", result.answer)
         self.assertNotIn("200.00 英镑", result.answer)
 
     def test_query_does_not_guess_from_an_unrelated_definition(self) -> None:

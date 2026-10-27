@@ -11,17 +11,13 @@ from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from taobao_agent.analysis_agent import (
-    ComparisonEvidence,
-    answer_analysis,
-    extract_user_comparison,
-)
+from taobao_agent.analysis_agent import MetricSeriesEvidence, answer_analysis
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
-from taobao_agent.query_agent import answer_query, fetch_comparison
+from taobao_agent.query_agent import answer_query, fetch_metric_series
 from taobao_agent.supervisor import ExpertName, select_expert
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
@@ -30,7 +26,7 @@ class WorkflowState(TypedDict):
     question: str
     intent: NotRequired[dict[str, object]]
     next_expert: NotRequired[ExpertName]
-    analysis_evidence: NotRequired[dict[str, object] | None]
+    query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
 
@@ -53,15 +49,9 @@ def build_workflow(
         intent = run_intent_once(state["question"], model, reference_date)
         return {"intent": intent.model_dump(mode="json")}
 
-    def supervisor_node(state: WorkflowState) -> dict[str, object]:
+    def supervisor_node(state: WorkflowState) -> dict[str, ExpertName]:
         intent = IntentResult.model_validate(state["intent"])
-        expert = select_expert(intent)
-        update: dict[str, object] = {"next_expert": expert}
-        if expert == "analysis":
-            supplied = extract_user_comparison(state["question"], intent)
-            if supplied is not None:
-                update["analysis_evidence"] = supplied.model_dump(mode="json")
-        return update
+        return {"next_expert": select_expert(intent)}
 
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": answer_other(state["question"])}
@@ -69,13 +59,13 @@ def build_workflow(
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
         if state["next_expert"] == "analysis":
-            result = fetch_comparison(
+            result = fetch_metric_series(
                 intent, metric_catalog, uci_db_path=uci_db_path,
                 query_model=query_model, question=state["question"],
             )
             if isinstance(result, str):
-                return {"answer": result, "analysis_evidence": None}
-            return {"analysis_evidence": result.model_dump(mode="json")}
+                return {"answer": result, "query_evidence": None}
+            return {"query_evidence": result.model_dump(mode="json")}
         return {
             "answer": answer_query(
                 intent, metric_catalog, uci_db_path=uci_db_path,
@@ -84,16 +74,16 @@ def build_workflow(
         }
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
-        evidence = ComparisonEvidence.model_validate(state["analysis_evidence"])
+        evidence = MetricSeriesEvidence.model_validate(state["query_evidence"])
         return {"answer": answer_analysis(evidence)}
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
-        if state["next_expert"] == "analysis" and state.get("analysis_evidence") is None:
+        if state["next_expert"] == "analysis":
             return "query"
         return state["next_expert"]
 
     def route_after_query(state: WorkflowState) -> str:
-        if state["next_expert"] == "analysis" and state.get("analysis_evidence") is not None:
+        if state["next_expert"] == "analysis" and state.get("query_evidence") is not None:
             return "analysis"
         return "done"
 
@@ -108,7 +98,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
-        {"other": "other", "query": "query", "analysis": "analysis"},
+        {"other": "other", "query": "query", "analysis": "query"},
     )
     graph.add_edge("other", END)
     graph.add_conditional_edges(

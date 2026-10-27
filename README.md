@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择最终专家 → 按证据选择执行路径**。Other 能回复寒暄；Query 可查询单日金额。两日比较若需查库，先由 Query 取得结构化金额，再交给 Analysis；若本轮问题明确给出同一指标、两天、相同单位的金额，可直接进入 Analysis，并标明数据未经数据库核实。Analysis 目前只能计算变化，不能诊断原因。阶段 2 的单节点练习已移到[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前程序运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择专家 → Query 查指标与取数 → 按需交给 Analysis**。Query 可处理同一指标的单日或多个指定日期；Analysis 接收整组查询证据，计算首末及相邻日期变化。当前数据源仅批准 UCI 的“交易明细金额”，总额变化还不能证明下降原因。第 18 课的“从用户问题里匹配两笔金额并跳过 Query”已移除。阶段 2 的单节点练习位于[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前运行。
 
 ## 环境与验证
 
@@ -35,7 +35,7 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 ## 主命令做什么
 
-上面的 GMV 命令在没有可查询数据源、也没有两笔明确金额时，只调用模型**一次**以得到意图 JSON。Supervisor 在程序内部选专家；主意图应是 `attribution`，`next_expert` 应是 `analysis`，`answer` 会说明缺少指标定义或可查询的数据源。配置 UCI 数据库的数值查询还会由 Query 向模型请求受控工具调用：单日再请求一次，两日再请求两次。
+上面的 GMV 命令在没有可查询数据源时，只调用模型**一次**以得到意图 JSON。Supervisor 在程序内部选专家；主意图应是 `attribution`，`next_expert` 应是 `analysis`，`answer` 会说明缺少指标定义或可查询的数据源。配置 UCI 数据库后，Query 会让同一个模型在受控工具循环中先查指标定义、再查询所需日期；模型请求次数取决于它如何安排工具调用，不能固定按日期计算。
 
 目前的对应关系：取数或查表结构 → `query`；波动归因 → `analysis`；其他问题 → `other`。原文还有 Ops 专家，但当前没有对应的已验证意图类型，因此暂不分配给 Ops。
 
@@ -101,7 +101,7 @@ uv run taobao-import-uci 'data/uci_online_retail/Online Retail.xlsx' 'data/uci_o
 env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-01 交易明细金额是多少？'
 ```
 
-第 13 课时，此命令用一次模型请求识别问题，Query 随后由 Python 调用受控工具。第 18 课起，Query 还向模型请求一次工具调用建议，核对工具名、指标和日期后才执行；完整命令共需两次模型请求。预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。若模型未给出合法工具调用，程序会安全结束，不输出猜测金额。日期超出数据范围时也不会把“无数据”说成“0 销售额”。第 13 课文档记录当时的实现。
+当前命令先请求一次 Intent，再由 Query 的受控工具循环查指标、查日期。预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。若模型未给出合法工具调用，程序会安全结束，不输出猜测金额。日期超出数据范围时也不会把“无数据”说成“0 销售额”。第 13 课文档记录当时的实现。
 
 你随后用 Plus Key 实际运行了这条命令，得到 `next_expert=query` 和 `58960.79 英镑`。这是该问法的一次真实调用验证，不能代表其他问法都能正确识别。
 
@@ -113,7 +113,7 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-02 交易明细金额为什么比 2010-12-01 下降？'
 ```
 
-目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再由 Query 节点分别请求两次受控工具调用，将核实过的结构化数值交给 Analysis 计算差额和变化率。若意图、日期和工具建议都正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。第 18 课起，完整命令最多发送三次模型请求：意图一次、两个日期各一次。当前代码改动后的真实百炼 Tool Calling 尚待你的终端验证；本地假模型与真实 SQLite 已验证数值路径。
+目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再由 Query 先查指标定义、查两天数据，把结构化证据交给 Analysis。若意图和工具调用正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。当前工具循环的真实百炼调用尚待验证；本地假模型与真实 SQLite 已验证数值路径。
 
 当前仅支持同一指标的两个明确日期、无分组和无指定范围；基期金额为零时不会给出无意义的百分比。仍使用 Python 自带 SQLite，无需安装数据库服务或 Navicat。详见[第 14 课](docs/learning/lessons/14-两日金额变化与Analysis节点.md)。
 
@@ -121,15 +121,15 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 
 ## 第 15 课：Query 把取数结果交给 Analysis
 
-第 14 课由 Analysis 直接调用查询工具。第 15 课改为 **Intent → Supervisor → Query → Analysis**：Query 查询两天，把指标、日期、整数金额、来源和单位写入 State，Analysis 只读取它并计算。第 18 课将当前 State 字段命名为 `analysis_evidence`，因为它也可能来自本轮用户明确给出的金额。若 Query 缺少日期、未找到指标或任一次取数失败，图在 Query 结束，不会把半份数据交给 Analysis。`next_expert=analysis` 表示最终专家；缺少金额时，Query 是取数前置步骤。第 15 课的[教学文档](docs/learning/lessons/15-Query到Analysis的结构化交接.md)记录当时的实现。
+第 14 课由 Analysis 直接调用查询工具。第 15 课改为 **Intent → Supervisor → Query → Analysis**：Query 把数值交给 Analysis。当前交接字段仍为 `State.query_evidence`，但内容已从固定两笔金额变为按日期排列的一组观测值。任一次取数失败，Query 不交出半份证据。`next_expert=analysis` 表示最终专家，Query 是它的取数前置步骤。第 15 课的[教学文档](docs/learning/lessons/15-Query到Analysis的结构化交接.md)记录当时的实现。
 
-要验证当前图的真实模型调用，可再次运行本节上方的 UCI 两日命令。**目的**：确认 Query → Analysis 路径仍返回正确数值，同时验证第 18 课新增的工具调用建议。**预期**：`next_expert=analysis`，`answer` 含 58960.79、47748.38、11212.41 英镑和 19.02%。主命令 JSON 不显示内部 `analysis_evidence`；本地测试检查这份交接。一次成功也不能证明所有问法可靠。
+要验证当前图的真实模型调用，可再次运行本节上方的 UCI 两日命令。**目的**：确认 Query → Analysis 路径仍返回正确数值，并验证 Query 的指标查找与查询工具循环。**预期**：`next_expert=analysis`，`answer` 含 58960.79、47748.38、11212.41 英镑和 19.02%。主命令 JSON 不显示内部 `query_evidence`；本地测试检查这份交接。一次成功也不能证明所有问法可靠。
 
 ## 第 16 课：明确 Query 的受控取数工具
 
-Query 的单日回答和两日比较现在都调用同一个 `query_daily_metric` 工具：单日调用一次，两日调用两次。工具对外只接收**指标名和日期**；指标目录与数据库路径由程序预先绑定。它核对批准的指标后，仍使用已有的 SQL 门禁和只读查询函数。`fetch_comparison()` 保持为安排两次取数的 Query 逻辑，随后把结果交给 Analysis。
+第 16 课时，Query 单日和两日路径共用 `query_daily_metric`：单日调用一次，两日调用两次。工具只接受指标名和日期；目录与数据库路径由程序绑定。第 19 课已将固定两次取数改为一组日期的任务，当前方法名为 `fetch_metric_series()`；历史课程仍记录当时的 `fetch_comparison()`。
 
-第 16 课时工具由 Python 程序调用；第 18 课让模型提出工具调用，由 Python 校验并执行。你可以再次运行上面的 UCI 两日命令检查当前路径；命令目的、预期和限制写在[第 18 课教学文档](docs/learning/lessons/18-证据路由与Query工具调用.md)。无新依赖，也无需安装数据库服务或 Navicat。
+第 16 课时工具由 Python 程序调用；现在 Query 可在有指标查找与日指标查询两个工具的循环中提出调用，由 Python 校验并执行。你可以再次运行上面的 UCI 两日命令检查当前路径；当前实现见[第 19 课教学文档](docs/learning/lessons/19-通用取数证据与工具循环.md)。无新依赖，也无需安装数据库服务或 Navicat。
 
 ## 第 17 课：移除教学运行模式
 
@@ -137,7 +137,19 @@ Query 的单日回答和两日比较现在都调用同一个 `query_daily_metric
 
 ## 第 18 课：按证据选择路径，并接入 Query Tool Calling
 
-这课把 Query 的单日和两日取数复用同一个函数；模型只可建议调用已绑定的 `query_daily_metric(指标名, 日期)`，程序会核对建议与 Intent 的已批准任务一致后执行。模型不能传数据库路径或 SQL。若问题本轮已经明确给出两天同一指标的金额和相同单位，Supervisor 可以直接把**用户提供、未经核实**的金额交给 Analysis；其余分析问题仍先走 Query。两条路径的计算都不声称找到了下降原因。[教学文档](docs/learning/lessons/18-证据路由与Query工具调用.md)有逐步调用链和验证方式。
+**历史实现，已由第 19 课替换，可以跳过。**第 18 课曾让模型按固定日期重复提出日指标工具调用，并为两笔用户金额添加直达 Analysis 的特殊分支；这些代码现已调整。[旧教学文档](docs/learning/lessons/18-证据路由与Query工具调用.md)只用于回看当时的设计。
+
+## 第 19 课：通用日期取数证据与 Query 工具循环
+
+本课可直接接在第 17 课之后学习。`IntentResult` 保留 `curr/prev`，新增可列出多个日期的 `dates`；Query 先用 `search_metrics` 查指标定义，再用 `query_daily_metric` 取得每个批准日期的金额，按顺序形成 `State.query_evidence.values`。Analysis 对 2～7 个日期计算首末与相邻变化；单日或多日取数问题由 Query 直接回答。第 18 课的用户金额捷径已移除，不必先学它。当前仍只接 UCI 的一个批准指标，没有维度拆解或完整波动归因。详见[第 19 课教学文档](docs/learning/lessons/19-通用取数证据与工具循环.md)。
+
+要用自己的 Plus Key 在线检查三日问法，可在已有 UCI SQLite 的同一个终端运行：
+
+```bash
+env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '比较 2010-12-01、2010-12-02、2010-12-03 的交易明细金额变化'
+```
+
+目的：验证真实模型能识别三个日期，并完成“查指标 → 逐日取数 → Analysis”的工具循环。预期数值为 58960.79、47748.38、46943.71 英镑，首末下降 12017.08 英镑、20.38%。实际模型调用轮次取决于工具安排；本地假模型与真实 SQLite 已得到这些数值，但**本课尚未使用真实百炼 Key 验证**。若模型未识别出三个日期或没有调用批准工具，程序不会编造缺失金额。
 
 ## 单独检查 Intent
 
@@ -153,7 +165,7 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 规则目前只识别“昨天 GMV 多少”“昨天 GMV 比前天为什么下降”“按行业看昨天的 GMV”这三类明确句式；不支持的句式不会猜答案。模型返回不合格式的 JSON 仍会报错，规则不会掩盖这种错误。
 
-可在项目根目录运行五条固定日期的业务样例评测；这会实际发送 **5 次模型请求**，请确认自己的额度后再运行：
+可在项目根目录运行六条固定日期的业务样例评测；这会实际发送 **6 次模型请求**，请确认自己的额度后再运行：
 
 ```bash
 DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run python scripts/evaluate_intent.py

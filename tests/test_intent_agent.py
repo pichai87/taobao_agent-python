@@ -42,6 +42,7 @@ def valid_payload() -> dict[str, object]:
         "time_label": "昨天比前天",
         "curr": "2026-06-14",
         "prev": "2026-06-13",
+        "dates": [],
         "scope": None,
         "dimensions": ["行业"],
     }
@@ -109,6 +110,18 @@ class IntentAgentTest(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             run_intent_once("昨天 GMV 多少？", FakeModel(payload), date(2026, 6, 15))
+
+    def test_three_dates_keep_the_original_curr_prev_contract(self) -> None:
+        payload = valid_payload()
+        payload["prev"] = "2010-12-01"
+        payload["curr"] = "2010-12-03"
+        payload["dates"] = ["2010-12-01", "2010-12-02", "2010-12-03"]
+        result = run_intent_once("比较三天交易明细金额", FakeModel(payload), date(2026, 6, 15))
+        self.assertEqual([day.isoformat() for day in result.requested_dates()], payload["dates"])
+
+        payload["dates"] = ["2010-12-01", "2010-12-01", "2010-12-03"]
+        with self.assertRaisesRegex(ValidationError, "duplicates"):
+            run_intent_once("比较三天交易明细金额", FakeModel(payload), date(2026, 6, 15))
 
     def test_rate_limit_uses_rule_for_observed_attribution_question(self) -> None:
         model = RateLimitedModel()
