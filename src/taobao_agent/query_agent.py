@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from taobao_agent.daily_metric_tool import (
     DailyMetricValue,
@@ -13,7 +13,6 @@ from taobao_agent.daily_metric_tool import (
     MetricNotFoundError,
     make_daily_metric_tool,
 )
-from taobao_agent.demo_query_tool import DemoQueryError
 from taobao_agent.harness import ToolUnavailableError, guarded_metric_search
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_search import MetricDefinition
@@ -30,14 +29,8 @@ class QueryEvidence(BaseModel):
     curr: date
     previous_minor: int = Field(ge=0)
     current_minor: int = Field(ge=0)
-    source: Literal["demo", "uci"]
-    unit: Literal["fen", "pence"]
-
-    @model_validator(mode="after")
-    def check_source_unit(self) -> "QueryEvidence":
-        if (self.source, self.unit) not in {("demo", "fen"), ("uci", "pence")}:
-            raise ValueError("query evidence source and unit do not match")
-        return self
+    source: Literal["uci"]
+    unit: Literal["pence"]
 
 
 def _query_day(daily_tool: BaseTool, metric_name: str, business_date: date) -> DailyMetricValue:
@@ -54,7 +47,6 @@ def _query_day(daily_tool: BaseTool, metric_name: str, business_date: date) -> D
 def fetch_comparison(
     intent: IntentResult,
     catalog: Sequence[MetricDefinition],
-    demo_data: bool = False,
     uci_db_path: Path | None = None,
 ) -> QueryEvidence | str:
     """Return two approved totals, or a safe explanation without partial numbers."""
@@ -73,16 +65,7 @@ def fetch_comparison(
     if metric is None:
         return f"尚未配置 {intent.metric_name} 的指标定义；当前没有执行分析。"
 
-    if demo_data:
-        if metric.name != "GMV" or metric.calculation is None or metric.calculation.unit != "fen":
-            return "教学数据模式目前只支持已配置完整规则、单位为分的 GMV 比较。"
-        try:
-            daily_tool = make_daily_metric_tool(catalog, demo_data=True)
-            previous_result = _query_day(daily_tool, metric.name, intent.prev)
-            current_result = _query_day(daily_tool, metric.name, intent.curr)
-        except (DemoQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
-            return "教学数据比较查询未通过校验或执行失败；当前没有返回比较结果。"
-    elif uci_db_path is not None:
+    if uci_db_path is not None:
         if metric.name != "交易明细金额" or metric.calculation is None or metric.calculation.unit != "pence":
             return "UCI 公开数据模式目前只支持交易明细金额比较。"
         try:
@@ -111,7 +94,6 @@ def fetch_comparison(
 def answer_query(
     intent: IntentResult,
     catalog: Sequence[MetricDefinition],
-    demo_data: bool = False,
     uci_db_path: Path | None = None,
 ) -> str:
     """Look up a metric; query only an explicitly enabled, supported data source."""
@@ -125,23 +107,6 @@ def answer_query(
         return "指标目录暂时不可用，请稍后重试。当前没有执行数据查询。"
     if metric is None:
         return f"尚未配置 {intent.metric_name} 的指标定义，无法查询数据。"
-
-    if demo_data and intent.intent_type == "data_query":
-        if metric.name != "GMV" or metric.calculation is None:
-            return "教学数据模式目前只支持已配置完整计算规则的 GMV。"
-        if metric.calculation.unit != "fen":
-            return "教学数据模式目前只支持单位为分的 GMV。"
-        if intent.curr is None:
-            return "请提供一个明确的查询日期；当前没有执行教学数据查询。"
-        if intent.prev is not None or intent.scope or intent.dimensions or intent.secondary_intents:
-            return "教学数据模式目前只支持单日、无分组的 GMV 查询；当前没有执行查询。"
-        try:
-            daily_tool = make_daily_metric_tool(catalog, demo_data=True)
-            result = _query_day(daily_tool, metric.name, intent.curr)
-        except (DemoQueryError, ToolUnavailableError, MetricNotFoundError, MetricNotApprovedError):
-            return "教学数据查询未通过校验或执行失败；当前没有返回数值。"
-        amount_yuan = f"{result.amount_minor // 100}.{result.amount_minor % 100:02d}"
-        return f"教学合成数据：{intent.curr.isoformat()} 的 GMV 为 {amount_yuan} 元。"
 
     if uci_db_path is not None and intent.intent_type == "data_query":
         if metric.name != "交易明细金额" or metric.calculation is None:

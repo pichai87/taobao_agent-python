@@ -7,7 +7,6 @@ from typing import Literal, Sequence
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field
 
-from taobao_agent.demo_query_tool import DEMO_CATALOG_PATH, query_demo_metric
 from taobao_agent.harness import guarded_metric_search
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition, NonEmptyText
@@ -31,8 +30,8 @@ class DailyMetricValue(BaseModel):
     metric_name: str
     business_date: date
     amount_minor: int = Field(ge=0)
-    source: Literal["demo", "uci"]
-    unit: Literal["fen", "pence"]
+    source: Literal["uci"]
+    unit: Literal["pence"]
 
 
 class MetricNotFoundError(Exception):
@@ -46,13 +45,9 @@ class MetricNotApprovedError(Exception):
 def make_daily_metric_tool(
     catalog: Sequence[MetricDefinition],
     *,
-    demo_data: bool = False,
-    uci_db_path: Path | None = None,
+    uci_db_path: Path,
 ) -> BaseTool:
-    """Bind trusted source configuration; expose only metric name and date."""
-
-    if demo_data == (uci_db_path is not None):
-        raise ValueError("必须且只能启用一个本地数据源")
+    """Bind the approved UCI source; expose only metric name and date."""
 
     @tool(
         "query_daily_metric",
@@ -64,20 +59,9 @@ def make_daily_metric_tool(
         if metric is None:
             raise MetricNotFoundError("指标目录中没有该指标")
 
-        if demo_data:
-            if metric != load_metric_catalog(DEMO_CATALOG_PATH)[0]:
-                raise MetricNotApprovedError("指标不在教学数据批准范围内")
-            amount = query_demo_metric(metric, business_date)
-            source: Literal["demo", "uci"] = "demo"
-            unit: Literal["fen", "pence"] = "fen"
-        else:
-            if metric != load_metric_catalog(UCI_CATALOG_PATH)[0]:
-                raise MetricNotApprovedError("指标不在 UCI 数据批准范围内")
-            if uci_db_path is None:
-                raise ValueError("UCI 数据源未配置")
-            amount = query_uci_metric(metric, business_date, uci_db_path)
-            source = "uci"
-            unit = "pence"
+        if metric != load_metric_catalog(UCI_CATALOG_PATH)[0]:
+            raise MetricNotApprovedError("指标不在 UCI 数据批准范围内")
+        amount = query_uci_metric(metric, business_date, uci_db_path)
 
         if amount < 0:
             raise MetricNotApprovedError("查询结果不是非负金额")
@@ -85,8 +69,8 @@ def make_daily_metric_tool(
             metric_name=metric.name,
             business_date=business_date,
             amount_minor=amount,
-            source=source,
-            unit=unit,
+            source="uci",
+            unit="pence",
         ).model_dump(mode="json")
 
     return query_daily_metric

@@ -1,12 +1,12 @@
 """Business checks for two-date comparisons and incomplete evidence."""
 
 import unittest
-from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from taobao_agent.analysis_agent import answer_analysis
-from taobao_agent.demo_query_tool import DEMO_CATALOG_PATH
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.query_agent import QueryEvidence, fetch_comparison
@@ -68,19 +68,14 @@ class AnalysisAgentTest(unittest.TestCase):
         self.assertIn("2010-12-01 至 2011-12-09", answer)
         self.assertIn("没有返回比较结果", answer)
 
-    def test_demo_comparison_uses_real_synthetic_orders(self) -> None:
-        demo_intent = intent("GMV").model_copy(
-            update={"prev": date(2026, 10, 21), "curr": date(2026, 10, 22)}
-        )
-        evidence = fetch_comparison(
-            demo_intent, load_metric_catalog(DEMO_CATALOG_PATH), demo_data=True
-        )
-        self.assertIsInstance(evidence, QueryEvidence)
-        answer = answer_analysis(evidence)
-        self.assertIn("300.00 元", answer)
-        self.assertIn("200.00 元", answer)
-        self.assertIn("下降 100.00 元，变化率 33.33%", answer)
-        self.assertIn("不能据此判断", answer)
+    def test_evidence_rejects_removed_demo_source_and_unit(self) -> None:
+        values = {
+            "metric_name": "交易明细金额", "prev": "2010-12-01", "curr": "2010-12-02",
+            "previous_minor": 10000, "current_minor": 8000,
+            "source": "demo", "unit": "fen",
+        }
+        with self.assertRaises(ValidationError):
+            QueryEvidence.model_validate(values)
 
 
 if __name__ == "__main__":

@@ -13,14 +13,9 @@ def _money(minor_units: int) -> str:
 def answer_analysis(evidence: QueryEvidence) -> str:
     """Explain a verified comparison; never claim a cause from two totals."""
 
-    if evidence.source == "demo":
-        source = "教学合成数据"
-        unit = "元"
-        caveat = "这只说明样例 GMV 的金额变化，不能据此判断下降或增长的原因。"
-    else:
-        source = "UCI Online Retail 公开数据"
-        unit = "英镑"
-        caveat = "这是排除取消、非正数量和非正单价后的交易明细金额，不是已支付 GMV；仅凭总额不能判断变化原因。"
+    source = "UCI Online Retail 公开数据"
+    unit = "英镑"
+    caveat = "这是排除取消、非正数量和非正单价后的交易明细金额，不是已支付 GMV；仅凭总额不能判断变化原因。"
 
     previous = evidence.previous_minor
     current = evidence.current_minor

@@ -57,7 +57,7 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 这条命令的目的是验证 Intent → Supervisor → Query → `search_metrics` 的真实调用链，会发送一次模型请求。**未设置指标目录文件时**，预期 `next_expert=query`，`answer` 提示“尚未配置 GMV 的指标定义，无法查询数据”。它不会产生 SQL，也不会给出 GMV 数值。只有模型把问题识别为取数意图时才会走到 Query；若输出不同，请提供不含 Key 的 JSON 结果。
 
-Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。仅在下面的教学数据模式中，Query 才调用第 11 课的固定模板门禁和本地只读查询工具。
+Query 的指标查找现经由一个小型 Harness 错误边界：目录查找超时或连接失败时，`answer` 会提示“指标目录暂时不可用”，不会展示内部异常详情。默认目录为空；超时和断线行为目前由本地测试模拟。配置 UCI 数据库后，Query 才调用固定模板门禁和本地只读查询工具。
 
 ## 指标目录文件
 
@@ -65,29 +65,19 @@ Query 的指标查找现经由一个小型 Harness 错误边界：目录查找�
 
 主命令会在调用模型前读取并检查文件。文件不存在、字段缺失或指标名重复时会退出并提示配置错误。加载成功仅表示格式符合要求，**不证明字段真实存在或业务口径正确**；普通模式下主命令不会据自定义目录生成 SQL 或访问数据库。
 
-## 第 9 课的教学数据
+## 合成数据测试样例
 
-`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段，并记录 `sum`、`paid_date`、`payment_status=paid` 和单位“分”。它们不是淘宝真实数据，也不是公开数据集的摘录。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。规则通过格式校验仍不足以证明真实表字段和业务口径正确；只有明确启用教学数据模式时，Agent 才查询这些合成订单。
+`examples/demo_shop.sql` 是手工编造的 6 笔订单，`examples/demo_metrics.json` 把 GMV 映射到样例表的金额字段，并记录 `sum`、`paid_date`、`payment_status=paid` 和单位“分”。它们不是淘宝真实数据，也不是公开数据集的摘录。2026-10-21 与 2026-10-22 的样例 GMV 分别为 300 元和 200 元。第 17 课起，这些文件仅供离线测试；主命令不再提供教学数据查询模式。
 
 在项目根目录运行 `UV_CACHE_DIR=/private/tmp/taobao-agent-uv-cache uv run --locked --offline python -m unittest discover -s tests -p 'test_demo_data.py' -v`，可以验证样例载入 SQLite 和固定日期的计算结果。这不调用模型，也不改变主命令；第 9 课解释了测试所用 SQL 和后续公开数据接入计划。
 
-当前使用 Python 自带的 `sqlite3` 在内存中建立合成数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
+测试使用 Python 自带的 `sqlite3` 在内存中建立合成数据库，**无需安装数据库服务或 Navicat**。以后如需外部数据库或图形管理工具，会先在对应课程文档说明用途、版本与安装方式；Navicat 属于可选的查看工具。
 
-第 11 课新增 `metric_sql.py`：它根据样例指标规则与指定日期生成一种带 `?` 参数的只读 `SELECT SUM`，再由 `validate_metric_query()` 核对 SQL、参数及批准的表字段。第 12 课让 Query 在教学数据模式下经由本地查询工具使用它。这个门禁只覆盖当前固定模板，尚不是任意 SQL 的通用校验器。
+第 11 课新增 `metric_sql.py`：它根据指标规则与指定日期生成一种带 `?` 参数的只读 `SELECT SUM`，再由 `validate_metric_query()` 核对 SQL、参数及批准的表字段。当前 UCI 查询继续使用这个门禁；合成 GMV 样例也用于门禁测试。它只覆盖当前固定模板，尚不是任意 SQL 的通用校验器。
 
-## 第 12 课：明确启用教学数据查询
+## 第 12 课的历史运行模式
 
-在项目根目录、已准备好 Plus Key 的终端运行：
-
-```bash
-env -u TAOBAO_METRIC_CATALOG_PATH TAOBAO_DEMO_DATA=1 DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2026-10-22 GMV 多少？'
-```
-
-`env -u` 只为这一条命令移除可能残留的自定义指标目录；`TAOBAO_DEMO_DATA=1` 也只对这条命令生效。主命令会调用模型一次做意图识别，再由原有 Query 节点查内置样例目录、调用固定 SQL 门禁和只读内存 SQLite。若模型识别为单日 GMV 取数，预期 `answer` 含“教学合成数据”和“200.00 元”。这条命令会发送一次真实模型请求；本项目尚未在当前环境用你的 Key 实测。模型若误判意图或日期，结果可能不同。比较、分组、指定范围以及缺少日期的问题会提示当前教学模式暂不支持。
-
-你随后已在自己的终端用 Plus Key 运行这句固定问题，得到 `next_expert=query` 和“教学合成数据：2026-10-22 的 GMV 为 200.00 元”。这是一条在线成功样例，不代表其他问法可靠。
-
-不设置 `TAOBAO_DEMO_DATA=1` 时仍使用普通模式，不能查询合成订单。教学模式会自动加载 `examples/demo_metrics.json`，不能同时设置自定义 `TAOBAO_METRIC_CATALOG_PATH`；也不会访问外部数据库。具体调用链和测试边界见第 12 课文档。
+第 12 课曾让主命令查询合成 GMV；你已经用 Plus Key 验证过那条历史链路。第 17 课按你的决定移除了这项运行模式。旧命令若设置 `TAOBAO_DEMO_DATA=1`，现在会在调用模型前提示模式已移除，不会访问合成订单。旧课文档保留当时的学习过程；当前可运行的数据查询命令见下方 UCI 示例。
 
 ## 第 13 课：用 UCI 公开数据完成查询
 
@@ -125,7 +115,7 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 
 目的：检查模型是否把问题识别为 `attribution` 并提取两个日期，再由 Query 节点调用两次既有只读查询工具，将结构化数值交给 Analysis 计算差额和变化率。若意图与日期正确，预期 `next_expert=analysis`，回答包含 `58960.79`、`47748.38`、`下降 11212.41 英镑` 和 `变化率 19.02%`，并说明总额不能解释原因。命令会发送一次模型请求；若模型日期提取不正确，请反馈不含 Key 的 JSON 结果。一次成功不代表归因可靠。
 
-Analysis 也可在 `TAOBAO_DEMO_DATA=1` 下比较合成 GMV。当前仅支持同一指标的两个明确日期、无分组和无指定范围；基期金额为零时不会给出无意义的百分比。仍使用 Python 自带 SQLite，无需安装数据库服务或 Navicat。详见[第 14 课](docs/learning/lessons/14-两日金额变化与Analysis节点.md)。
+当前仅支持同一指标的两个明确日期、无分组和无指定范围；基期金额为零时不会给出无意义的百分比。仍使用 Python 自带 SQLite，无需安装数据库服务或 Navicat。详见[第 14 课](docs/learning/lessons/14-两日金额变化与Analysis节点.md)。
 
 你随后用 Plus Key 实测了上面的 UCI 两日问题：意图为 `attribution`，两个日期正确，回答包含 `下降 11212.41 英镑，变化率 19.02%`。这是第 14 课代码的一条真实在线样例。
 
@@ -140,6 +130,10 @@ Analysis 也可在 `TAOBAO_DEMO_DATA=1` 下比较合成 GMV。当前仅支持同
 Query 的单日回答和两日比较现在都调用同一个 `query_daily_metric` 工具：单日调用一次，两日调用两次。工具对外只接收**指标名和日期**；指标目录与数据库路径由程序预先绑定。它核对批准的指标后，仍使用已有的 SQL 门禁和只读查询函数。`fetch_comparison()` 保持为安排两次取数的 Query 逻辑，随后把结果交给 Analysis。
 
 本课的工具由 Python 程序调用，**尚不是 LLM 自主选择工具**。你可以再次运行上面的 UCI 两日命令，检查改动后是否仍返回 11212.41 英镑、19.02%；命令目的、预期和限制也写在[第 16 课教学文档](docs/learning/lessons/16-受控日指标工具.md)。它会发一次模型请求；本课本地验证使用了假模型，未消耗你的 Key。无新依赖，也无需安装数据库服务或 Navicat。
+
+## 第 17 课：移除教学运行模式
+
+主命令只在配置 `TAOBAO_UCI_DB_PATH` 时查询当前批准的公开数据；没有数据库路径时仍可检查指标定义，但不返回数值。合成订单和指标文件保留在 `examples/`，只用于离线测试。`TAOBAO_DEMO_DATA=1` 已停用。Query、Analysis 和受控工具的 demo 分支已移除，UCI 的单日与两日调用链、SQL 门禁和只读限制仍在。细节见[第 17 课教学文档](docs/learning/lessons/17-移除教学运行模式.md)。
 
 ## 单独检查 Intent
 

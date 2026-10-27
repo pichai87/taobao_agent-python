@@ -15,7 +15,6 @@ from unittest.mock import patch
 from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from taobao_agent.demo_query_tool import DEMO_CATALOG_PATH, DemoQueryError
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
@@ -77,9 +76,9 @@ class TimeoutCatalog(Sequence[MetricDefinition]):
 
 class WorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
-        demo_setting = patch.dict(os.environ, {"TAOBAO_DEMO_DATA": "0"})
-        demo_setting.start()
-        self.addCleanup(demo_setting.stop)
+        legacy_setting = patch.dict(os.environ, {"TAOBAO_DEMO_DATA": "0"})
+        legacy_setting.start()
+        self.addCleanup(legacy_setting.stop)
 
     def test_one_question_flows_from_intent_to_supervisor(self) -> None:
         model = FakeModel("attribution")
@@ -126,20 +125,6 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("demo_sales_daily.paid_amount", result.answer)
         self.assertIn("test fixture", result.answer)
         self.assertIn("无法返回数值", result.answer)
-        self.assertEqual(len(model.calls), 1)
-
-    def test_demo_query_runs_through_the_existing_graph(self) -> None:
-        model = FakeModel("data_query")
-        catalog = load_metric_catalog(DEMO_CATALOG_PATH)
-
-        result = run_workflow(
-            "2026-10-22 GMV 多少？", model, date(2026, 10, 23), catalog, demo_data=True
-        )
-
-        self.assertEqual(result.next_expert, "query")
-        self.assertIn("教学合成数据", result.answer)
-        self.assertIn("2026-10-22", result.answer)
-        self.assertIn("200.00 元", result.answer)
         self.assertEqual(len(model.calls), 1)
 
     def test_uci_query_runs_through_existing_graph(self) -> None:
@@ -194,22 +179,27 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(len(model.calls), 1)
 
     def test_attribution_passes_structured_query_evidence_to_analysis(self) -> None:
-        model = FakeModel("attribution", prev="2026-10-21")
-        updates = list(
-            build_workflow(
-                model, date(2026, 10, 23), load_metric_catalog(DEMO_CATALOG_PATH),
-                demo_data=True,
-            ).stream({"question": "2026-10-22 GMV 比 2026-10-21 下降多少？"})
+        model = FakeModel(
+            "attribution", metric_name="交易明细金额",
+            prev="2010-12-01", curr="2010-12-02",
         )
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric", side_effect=[10000, 8000]):
+            updates = list(
+                build_workflow(
+                    model, date(2026, 10, 23), load_metric_catalog(UCI_CATALOG_PATH),
+                    uci_db_path=Path("unused.sqlite"),
+                ).stream({"question": "2010-12-02 交易明细金额比 2010-12-01 下降多少？"})
+            )
 
         self.assertEqual([next(iter(update)) for update in updates], [
             "intent", "supervisor", "query", "analysis",
         ])
         evidence = updates[2]["query"]["query_evidence"]
-        self.assertEqual(evidence["previous_minor"], 30000)
-        self.assertEqual(evidence["current_minor"], 20000)
+        self.assertEqual(evidence["previous_minor"], 10000)
+        self.assertEqual(evidence["current_minor"], 8000)
+        self.assertEqual(evidence["source"], "uci")
         self.assertNotIn("answer", updates[2]["query"])
-        self.assertIn("下降 100.00 元", updates[3]["analysis"]["answer"])
+        self.assertIn("下降 20.00 英镑", updates[3]["analysis"]["answer"])
         self.assertEqual(len(model.calls), 1)
 
     def test_failed_comparison_stops_after_query_without_partial_evidence(self) -> None:
@@ -278,7 +268,6 @@ class WorkflowTest(unittest.TestCase):
                     os.environ,
                     {
                         "TAOBAO_UCI_DB_PATH": str(database_path),
-                        "TAOBAO_DEMO_DATA": "0",
                         "TAOBAO_METRIC_CATALOG_PATH": "",
                     },
                 ),
@@ -301,7 +290,6 @@ class WorkflowTest(unittest.TestCase):
                     os.environ,
                     {
                         "TAOBAO_UCI_DB_PATH": str(Path(directory) / "missing.sqlite"),
-                        "TAOBAO_DEMO_DATA": "0",
                         "TAOBAO_METRIC_CATALOG_PATH": "",
                     },
                 ),
@@ -316,24 +304,35 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("数据库文件不存在", stderr.getvalue())
         create_model.assert_not_called()
 
-    def test_demo_data_does_not_run_without_explicit_opt_in(self) -> None:
+    def test_synthetic_catalog_does_not_enable_database_query(self) -> None:
+        synthetic_catalog = load_metric_catalog(
+            Path(__file__).resolve().parents[1] / "examples" / "demo_metrics.json"
+        )
         result = run_workflow(
             "2026-10-22 GMV 多少？",
             FakeModel("data_query"),
             date(2026, 10, 23),
-            load_metric_catalog(DEMO_CATALOG_PATH),
+            synthetic_catalog,
         )
 
         self.assertIn("当前尚未接入数据查询", result.answer)
         self.assertNotIn("200.00 元", result.answer)
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query:
+            result = run_workflow(
+                "2026-10-22 GMV 多少？", FakeModel("data_query"),
+                date(2026, 10, 23), synthetic_catalog,
+                uci_db_path=Path("unused.sqlite"),
+            )
+        self.assertIn("只支持交易明细金额", result.answer)
+        query.assert_not_called()
 
-    def test_demo_query_requires_a_supported_single_day_question(self) -> None:
-        catalog = load_metric_catalog(DEMO_CATALOG_PATH)
+    def test_uci_query_requires_a_supported_single_day_question(self) -> None:
+        catalog = load_metric_catalog(UCI_CATALOG_PATH)
         intent = IntentResult(
             intent_type="data_query",
             secondary_intents=[],
             confidence=0.9,
-            metric_name="GMV",
+            metric_name="交易明细金额",
             metric_field=None,
             time_label=None,
             curr=None,
@@ -341,47 +340,49 @@ class WorkflowTest(unittest.TestCase):
             scope=None,
             dimensions=[],
         )
-        with patch("taobao_agent.daily_metric_tool.query_demo_metric") as query_tool:
-            self.assertIn("明确的查询日期", answer_query(intent, catalog, demo_data=True))
+        with patch("taobao_agent.daily_metric_tool.query_uci_metric") as query_tool:
+            self.assertIn("明确的查询日期", answer_query(intent, catalog, uci_db_path=Path("unused.sqlite")))
             grouped = intent.model_copy(
-                update={"curr": date(2026, 10, 22), "dimensions": ["行业"]}
+                update={"curr": date(2010, 12, 1), "dimensions": ["国家"]}
             )
-            self.assertIn("无分组", answer_query(grouped, catalog, demo_data=True))
+            self.assertIn("无分组", answer_query(grouped, catalog, uci_db_path=Path("unused.sqlite")))
             compared = intent.model_copy(
-                update={"curr": date(2026, 10, 22), "prev": date(2026, 10, 21)}
+                update={"curr": date(2010, 12, 2), "prev": date(2010, 12, 1)}
             )
-            self.assertIn("单日", answer_query(compared, catalog, demo_data=True))
+            self.assertIn("单日", answer_query(compared, catalog, uci_db_path=Path("unused.sqlite")))
             query_tool.assert_not_called()
 
-    def test_demo_query_hides_internal_tool_failure(self) -> None:
+    def test_uci_query_hides_internal_tool_failure(self) -> None:
         with patch(
-            "taobao_agent.daily_metric_tool.query_demo_metric",
-            side_effect=DemoQueryError("private demo file path"),
+            "taobao_agent.daily_metric_tool.query_uci_metric",
+            side_effect=UCIQueryError("private database path"),
         ):
             result = run_workflow(
-                "2026-10-22 GMV 多少？",
-                FakeModel("data_query"),
+                "2010-12-01 交易明细金额是多少？",
+                FakeModel("data_query", metric_name="交易明细金额", curr="2010-12-01"),
                 date(2026, 10, 23),
-                load_metric_catalog(DEMO_CATALOG_PATH),
-                demo_data=True,
+                load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=Path("unused.sqlite"),
             )
 
-        self.assertIn("教学数据查询未通过校验", result.answer)
-        self.assertNotIn("private demo file path", result.answer)
+        self.assertIn("公开数据查询未通过校验", result.answer)
+        self.assertNotIn("private database path", result.answer)
 
     def test_query_rejects_tool_value_for_a_different_date(self) -> None:
         with patch("taobao_agent.query_agent.make_daily_metric_tool") as make_tool:
             make_tool.return_value.invoke.return_value = {
-                "metric_name": "GMV", "business_date": "2026-10-21",
-                "amount_minor": 20000, "source": "demo", "unit": "fen",
+                "metric_name": "交易明细金额", "business_date": "2010-12-02",
+                "amount_minor": 20000, "source": "uci", "unit": "pence",
             }
             result = run_workflow(
-                "2026-10-22 GMV 多少？", FakeModel("data_query"), date(2026, 10, 23),
-                load_metric_catalog(DEMO_CATALOG_PATH), demo_data=True,
+                "2010-12-01 交易明细金额是多少？",
+                FakeModel("data_query", metric_name="交易明细金额", curr="2010-12-01"),
+                date(2026, 10, 23), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=Path("unused.sqlite"),
             )
 
         self.assertIn("查询未通过校验", result.answer)
-        self.assertNotIn("200.00 元", result.answer)
+        self.assertNotIn("200.00 英镑", result.answer)
 
     def test_query_does_not_guess_from_an_unrelated_definition(self) -> None:
         model = FakeModel("data_query")
@@ -528,32 +529,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("demo_sales_daily.paid_amount", result["answer"])
         self.assertEqual(len(model.calls), 1)
 
-    def test_main_cli_demo_mode_uses_the_built_in_catalog(self) -> None:
-        model = FakeModel("data_query")
-        output = io.StringIO()
-        with (
-            patch.dict(
-                os.environ,
-                {"TAOBAO_DEMO_DATA": "1", "TAOBAO_METRIC_CATALOG_PATH": ""},
-            ),
-            patch("sys.argv", ["taobao-agent", "2026-10-22 GMV 多少？"]),
-            patch("sys.stdout", output),
-            patch("taobao_agent.workflow.create_qwen_model", return_value=model),
-        ):
-            main()
-
-        result = json.loads(output.getvalue())
-        self.assertEqual(result["next_expert"], "query")
-        self.assertIn("200.00 元", result["answer"])
-        self.assertEqual(len(model.calls), 1)
-
-    def test_main_cli_rejects_mixed_demo_and_custom_catalog(self) -> None:
+    def test_main_cli_rejects_removed_demo_mode_before_model(self) -> None:
         stderr = io.StringIO()
         with (
-            patch.dict(
-                os.environ,
-                {"TAOBAO_DEMO_DATA": "1", "TAOBAO_METRIC_CATALOG_PATH": "custom.json"},
-            ),
+            patch.dict(os.environ, {"TAOBAO_DEMO_DATA": "1"}),
             patch("sys.argv", ["taobao-agent", "2026-10-22 GMV 多少？"]),
             patch("sys.stderr", stderr),
             patch("taobao_agent.workflow.create_qwen_model") as create_model,
@@ -562,7 +541,7 @@ class WorkflowTest(unittest.TestCase):
                 main()
 
         self.assertEqual(result.exception.code, 2)
-        self.assertIn("不能同时设置", stderr.getvalue())
+        self.assertIn("教学模式已移除", stderr.getvalue())
         create_model.assert_not_called()
 
     def test_main_cli_keeps_empty_catalog_without_path(self) -> None:
