@@ -1,9 +1,11 @@
 """The single place that creates the configured chat model."""
 
 import os
+from collections.abc import Sequence
 from typing import Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 
@@ -11,7 +13,13 @@ class ChatModel(Protocol):
     def invoke(self, messages: list[BaseMessage]) -> AIMessage: ...
 
 
-def create_qwen_model() -> ChatModel:
+class ToolCallingModel(ChatModel, Protocol):
+    def bind_tools(
+        self, tools: Sequence[BaseTool], *, tool_choice: str = "auto"
+    ) -> ChatModel: ...
+
+
+def create_qwen_model() -> ToolCallingModel:
     """Read the current command's credentials without storing them in the project."""
 
     api_key = os.environ.get("DASHSCOPE_API_KEY")

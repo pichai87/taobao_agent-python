@@ -11,13 +11,17 @@ from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from taobao_agent.analysis_agent import answer_analysis
+from taobao_agent.analysis_agent import (
+    ComparisonEvidence,
+    answer_analysis,
+    extract_user_comparison,
+)
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
-from taobao_agent.model import ChatModel, create_qwen_model
+from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
-from taobao_agent.query_agent import QueryEvidence, answer_query, fetch_comparison
+from taobao_agent.query_agent import answer_query, fetch_comparison
 from taobao_agent.supervisor import ExpertName, select_expert
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
@@ -26,7 +30,7 @@ class WorkflowState(TypedDict):
     question: str
     intent: NotRequired[dict[str, object]]
     next_expert: NotRequired[ExpertName]
-    query_evidence: NotRequired[dict[str, object] | None]
+    analysis_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
 
@@ -41,6 +45,7 @@ def build_workflow(
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
     uci_db_path: Path | None = None,
+    query_model: ToolCallingModel | None = None,
 ):
     """Compile the main graph with Query, Analysis, and Other branches."""
 
@@ -48,9 +53,15 @@ def build_workflow(
         intent = run_intent_once(state["question"], model, reference_date)
         return {"intent": intent.model_dump(mode="json")}
 
-    def supervisor_node(state: WorkflowState) -> dict[str, ExpertName]:
+    def supervisor_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
-        return {"next_expert": select_expert(intent)}
+        expert = select_expert(intent)
+        update: dict[str, object] = {"next_expert": expert}
+        if expert == "analysis":
+            supplied = extract_user_comparison(state["question"], intent)
+            if supplied is not None:
+                update["analysis_evidence"] = supplied.model_dump(mode="json")
+        return update
 
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": answer_other(state["question"])}
@@ -59,26 +70,30 @@ def build_workflow(
         intent = IntentResult.model_validate(state["intent"])
         if state["next_expert"] == "analysis":
             result = fetch_comparison(
-                intent, metric_catalog, uci_db_path=uci_db_path
+                intent, metric_catalog, uci_db_path=uci_db_path,
+                query_model=query_model, question=state["question"],
             )
             if isinstance(result, str):
-                return {"answer": result, "query_evidence": None}
-            return {"query_evidence": result.model_dump(mode="json")}
+                return {"answer": result, "analysis_evidence": None}
+            return {"analysis_evidence": result.model_dump(mode="json")}
         return {
             "answer": answer_query(
-                intent, metric_catalog, uci_db_path=uci_db_path
+                intent, metric_catalog, uci_db_path=uci_db_path,
+                query_model=query_model, question=state["question"],
             )
         }
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
-        evidence = QueryEvidence.model_validate(state["query_evidence"])
+        evidence = ComparisonEvidence.model_validate(state["analysis_evidence"])
         return {"answer": answer_analysis(evidence)}
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
+        if state["next_expert"] == "analysis" and state.get("analysis_evidence") is None:
+            return "query"
         return state["next_expert"]
 
     def route_after_query(state: WorkflowState) -> str:
-        if state["next_expert"] == "analysis" and state.get("query_evidence") is not None:
+        if state["next_expert"] == "analysis" and state.get("analysis_evidence") is not None:
             return "analysis"
         return "done"
 
@@ -93,7 +108,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
-        {"other": "other", "query": "query", "analysis": "query"},
+        {"other": "other", "query": "query", "analysis": "analysis"},
     )
     graph.add_edge("other", END)
     graph.add_conditional_edges(
@@ -109,12 +124,15 @@ def run_workflow(
     reference_date: date,
     metric_catalog: Sequence[MetricDefinition] = (),
     uci_db_path: Path | None = None,
+    query_model: ToolCallingModel | None = None,
 ) -> WorkflowResult:
     """Run the active path and return the selected expert's answer."""
 
     if not question.strip():
         raise ValueError("Question must not be empty")
-    state = build_workflow(model, reference_date, metric_catalog, uci_db_path).invoke(
+    state = build_workflow(
+        model, reference_date, metric_catalog, uci_db_path, query_model
+    ).invoke(
         {"question": question.strip()}
     )
     return WorkflowResult(
@@ -149,8 +167,9 @@ def main() -> None:
 
     try:
         result = run_workflow(
-            args.question, model, date.today(), metric_catalog, uci_db_path
+            args.question, model, date.today(), metric_catalog, uci_db_path,
+            query_model=model,
         )
     except ModelRateLimitError:
-        parser.exit(3, "百炼返回 429：当前模型请求受到限流，且规则无法识别该问题。\n")
+        parser.exit(3, "百炼返回 429：当前模型请求受到限流，本次任务未完成。\n")
     print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False))
