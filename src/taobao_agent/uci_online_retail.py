@@ -13,7 +13,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from taobao_agent.metric_search import MetricDefinition
-from taobao_agent.metric_sql import build_metric_query, validate_metric_query
+from taobao_agent.metric_sql import MetricQuery, build_metric_query, validate_metric_query
 
 
 UCI_CATALOG_PATH = (
@@ -152,7 +152,10 @@ def import_uci_online_retail(source_path: Path, database_path: Path) -> ImportSu
     )
 
 
-def query_uci_metric(metric: MetricDefinition, business_date: date, database_path: Path) -> int:
+def query_uci_metric(
+    metric: MetricDefinition, business_date: date, database_path: Path,
+    *, candidate: MetricQuery | None = None,
+) -> int:
     """Run one validated sum against a read-only imported UCI database."""
 
     calculation = metric.calculation
@@ -182,7 +185,7 @@ def query_uci_metric(metric: MetricDefinition, business_date: date, database_pat
             actual_columns = frozenset(
                 row[1] for row in connection.execute('PRAGMA table_info("retail_lines")')
             )
-            candidate = build_metric_query(metric, business_date)
+            candidate = candidate if candidate is not None else build_metric_query(metric, business_date)
             approved = validate_metric_query(
                 candidate, metric, business_date,
                 {_TABLE: actual_columns & _APPROVED_COLUMNS},

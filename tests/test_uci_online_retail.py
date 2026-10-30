@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from openpyxl import Workbook
 
 from taobao_agent.metric_catalog import load_metric_catalog
+from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.uci_online_retail import (
     UCI_CATALOG_PATH,
     UCIDateOutOfRange,
@@ -83,6 +84,20 @@ class UCIOnlineRetailTest(unittest.TestCase):
         with self.assertRaises(UCIQueryError):
             query_uci_metric(self.metric, date(2010, 12, 1), self.directory / "missing.sqlite")
         self.assertFalse((self.directory / "missing.sqlite").exists())
+
+    def test_prepared_sql_is_checked_again_at_database_boundary(self) -> None:
+        import_uci_online_retail(self.workbook_path, self.database_path)
+        day = date(2010, 12, 1)
+        approved = build_metric_query(self.metric, day)
+        self.assertEqual(
+            query_uci_metric(self.metric, day, self.database_path, candidate=approved), 635,
+        )
+        changed = MetricQuery(approved.statement.replace("SUM", "MAX"), approved.parameters)
+        with self.assertRaises(UCIQueryError):
+            query_uci_metric(self.metric, day, self.database_path, candidate=changed)
+        wrong_day = MetricQuery(approved.statement, ("2010-12-02", "positive"))
+        with self.assertRaises(UCIQueryError):
+            query_uci_metric(self.metric, day, self.database_path, candidate=wrong_day)
 
 
 if __name__ == "__main__":

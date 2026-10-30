@@ -35,7 +35,7 @@ DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run tao
 
 ## 主命令做什么
 
-上面的 GMV 命令在没有可查询数据源时，只调用模型**一次**以得到意图 JSON。Supervisor 在程序内部选专家；主意图应是 `attribution`，`next_expert` 应是 `analysis`，`answer` 会说明缺少指标定义或可查询的数据源。配置 UCI 数据库后，Query 会让同一个模型在受控工具循环中先查指标定义、再查询所需日期；模型请求次数取决于它如何安排工具调用，不能固定按日期计算。
+上面的 GMV 命令在没有可查询数据源时，只调用模型**一次**以得到意图 JSON。Supervisor 在程序内部选专家；主意图应是 `attribution`，`next_expert` 应是 `analysis`，`answer` 会说明缺少指标定义或可查询的数据源。配置 UCI 数据库后，Query 会让同一个模型在受控工具循环中依次查指标、查规则、构建 SQL、查询所需日期；模型请求次数取决于它如何安排工具调用，不能固定按日期计算。
 
 目前的对应关系：取数或查表结构 → `query`；波动归因 → `analysis`；其他问题 → `other`。原文还有 Ops 专家，但当前没有对应的已验证意图类型，因此暂不分配给 Ops。
 
@@ -101,7 +101,7 @@ uv run taobao-import-uci 'data/uci_online_retail/Online Retail.xlsx' 'data/uci_o
 env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-01 交易明细金额是多少？'
 ```
 
-当前命令先请求一次 Intent，再由 Query 的受控工具循环查指标、查日期。预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。若模型未给出合法工具调用，程序会安全结束，不输出猜测金额。日期超出数据范围时也不会把“无数据”说成“0 销售额”。第 13 课文档记录当时的实现。
+当前命令先请求一次 Intent，再由 Query 的受控工具循环查指标、查规则、构建 SQL、查日期。预期 `next_expert=query`，`answer` 含 `58960.79 英镑` 和“不是已支付 GMV”。若模型未给出合法工具调用，程序会安全结束，不输出猜测金额。日期超出数据范围时也不会把“无数据”说成“0 销售额”。第 13 课文档记录当时的实现；当前四步链路见[第 20 课](docs/learning/lessons/20-Query完整取数工具链.md)。
 
 你随后用 Plus Key 实际运行了这条命令，得到 `next_expert=query` 和 `58960.79 英镑`。这是该问法的一次真实调用验证，不能代表其他问法都能正确识别。
 
@@ -129,7 +129,7 @@ env -u TAOBAO_METRIC_CATALOG_PATH -u TAOBAO_DEMO_DATA TAOBAO_UCI_DB_PATH=data/uc
 
 第 16 课时，Query 单日和两日路径共用 `query_daily_metric`：单日调用一次，两日调用两次。工具只接受指标名和日期；目录与数据库路径由程序绑定。第 19 课已将固定两次取数改为一组日期的任务，当前方法名为 `fetch_metric_series()`；历史课程仍记录当时的 `fetch_comparison()`。
 
-第 16 课时工具由 Python 程序调用；现在 Query 可在有指标查找与日指标查询两个工具的循环中提出调用，由 Python 校验并执行。你可以再次运行上面的 UCI 两日命令检查当前路径；当前实现见[第 19 课教学文档](docs/learning/lessons/19-通用取数证据与工具循环.md)。无新依赖，也无需安装数据库服务或 Navicat。
+第 16 课时工具由 Python 程序调用；现在 Query 可在四步受控工具循环中提出调用，由 Python 校验并执行。你可以再次运行上面的 UCI 两日命令检查当前路径；当前实现见[第 20 课教学文档](docs/learning/lessons/20-Query完整取数工具链.md)。无新依赖，也无需安装数据库服务或 Navicat。
 
 ## 第 17 课：移除教学运行模式
 

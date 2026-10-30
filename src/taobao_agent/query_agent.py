@@ -20,7 +20,8 @@ from taobao_agent.daily_metric_tool import (
 )
 from taobao_agent.harness import ToolUnavailableError, guarded_metric_search
 from taobao_agent.intent_agent import IntentResult
-from taobao_agent.metric_search import MetricDefinition, NonEmptyText
+from taobao_agent.metric_search import MetricCalculation, MetricDefinition, NonEmptyText
+from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.model import ToolCallingModel
 from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError
 
@@ -45,6 +46,12 @@ class MetricSearchInput(BaseModel):
     metric_name: NonEmptyText
 
 
+class BuildSqlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    metric_name: NonEmptyText
+    dates: tuple[date, ...] = Field(min_length=1, max_length=7)
+
+
 class ToolProposalError(Exception):
     """The model proposed a tool call outside the approved task."""
 
@@ -66,7 +73,7 @@ def _run_tool_loop(
     model: ToolCallingModel,
     question: str,
 ) -> tuple[DailyMetricValue, ...]:
-    """Let Query choose search and daily tools, then validate every proposed action."""
+    """Execute the approved metric, rule, SQL and read-only query chain."""
 
     @tool("search_metrics", args_schema=MetricSearchInput)
     def search_metric(metric_name: str) -> dict[str, object]:
@@ -77,12 +84,43 @@ def _run_tool_loop(
             raise MetricNotFoundError("指标目录中没有该指标")
         return found.model_dump(mode="json")
 
-    daily_tool = make_daily_metric_tool(catalog, uci_db_path=database_path)
-    tools: dict[str, BaseTool] = {search_metric.name: search_metric, daily_tool.name: daily_tool}
+    selected_metric: MetricDefinition | None = None
+    approved_rule: MetricCalculation | None = None
+    prepared_queries: dict[date, MetricQuery] = {}
+
+    @tool("rule_search", args_schema=MetricSearchInput)
+    def rule_search(metric_name: str) -> dict[str, object]:
+        """Read the approved calculation rule for the selected metric."""
+
+        if selected_metric is None or selected_metric.name != metric_name or selected_metric.calculation is None:
+            raise MetricNotApprovedError("指标没有已批准的计算规则")
+        return selected_metric.calculation.model_dump(mode="json")
+
+    @tool("build_sql", args_schema=BuildSqlInput)
+    def build_sql(metric_name: str, dates: tuple[date, ...]) -> dict[str, object]:
+        """Build parameterized SQL for each approved date; do not accept raw SQL."""
+
+        if selected_metric is None or selected_metric.name != metric_name:
+            raise MetricNotApprovedError("指标尚未核准")
+        candidates = {day: build_metric_query(selected_metric, day) for day in dates}
+        prepared_queries.update(candidates)
+        return {"queries": [
+            {"business_date": day.isoformat(), "statement": query.statement,
+             "parameters": list(query.parameters)}
+            for day, query in candidates.items()
+        ]}
+
+    daily_tool = make_daily_metric_tool(
+        catalog, uci_db_path=database_path, prepared_queries=prepared_queries,
+    )
+    tools: dict[str, BaseTool] = {
+        item.name: item for item in (search_metric, rule_search, build_sql, daily_tool)
+    }
     bound = model.bind_tools(list(tools.values()), tool_choice="auto")
     messages = [
         SystemMessage(content=(
-            "你是取数专家。先用 search_metrics 找到指标定义，再用 query_daily_metric 查询任务中的每个日期。"
+            "你是取数专家。依次调用 search_metrics、rule_search、build_sql，"
+            "最后用 query_daily_metric 查询任务中的每个日期。build_sql 一次传入全部核准日期。"
             "只调用提供的工具，不自行编造数据、表名或 SQL；完成指定日期后停止。"
         )),
         HumanMessage(content=(
@@ -91,16 +129,18 @@ def _run_tool_loop(
         )),
     ]
     searched = False
+    rule_found = False
+    sql_built = False
     observations: dict[date, DailyMetricValue] = {}
     call_count = 0
-    for _ in range(9):
+    for _ in range(12):
         response = bound.invoke(messages)
         if not isinstance(response, AIMessage) or response.invalid_tool_calls or not response.tool_calls:
             raise ToolProposalError("模型未提出有效工具调用")
         messages.append(response)
         for proposal in response.tool_calls:
             call_count += 1
-            if call_count > 10:
+            if call_count > 12:
                 raise ToolProposalError("工具调用超过上限")
             name, raw_args, call_id = proposal.get("name"), proposal.get("args"), proposal.get("id")
             if name not in tools or not isinstance(call_id, str) or not call_id:
@@ -116,12 +156,33 @@ def _run_tool_loop(
                         raise ToolProposalError("指标查找结果与任务不一致")
                     if metric.name != "交易明细金额" or metric.calculation is None or metric.calculation.unit != "pence":
                         raise MetricNotApprovedError("当前数据源不支持该指标")
+                    selected_metric = metric
                     searched = True
                     tool_result = metric.model_dump(mode="json")
+                elif name == "rule_search":
+                    args = MetricSearchInput.model_validate(raw_args)
+                    if not searched or rule_found or args.metric_name != plan.metric_name:
+                        raise ToolProposalError("计算规则查找顺序或指标不正确")
+                    rule = MetricCalculation.model_validate(rule_search.invoke(args.model_dump(mode="json")))
+                    if selected_metric is None or rule != selected_metric.calculation:
+                        raise ToolProposalError("计算规则与指标定义不一致")
+                    approved_rule = rule
+                    rule_found = True
+                    tool_result = rule.model_dump(mode="json")
+                elif name == "build_sql":
+                    args = BuildSqlInput.model_validate(raw_args)
+                    if not rule_found or sql_built or args.metric_name != plan.metric_name or args.dates != plan.dates:
+                        raise ToolProposalError("SQL 构建顺序、指标或日期与任务不一致")
+                    if selected_metric is None or approved_rule != selected_metric.calculation:
+                        raise ToolProposalError("SQL 构建缺少已核准规则")
+                    tool_result = build_sql.invoke(args.model_dump(mode="json"))
+                    if set(prepared_queries) != set(plan.dates):
+                        raise ToolProposalError("SQL 构建结果缺少日期")
+                    sql_built = True
                 else:
                     args = DailyMetricInput.model_validate(raw_args)
-                    if not searched or args.metric_name != plan.metric_name:
-                        raise ToolProposalError("查询前未核实指标，或指标与任务不一致")
+                    if not sql_built or args.metric_name != plan.metric_name:
+                        raise ToolProposalError("查询前未完成指标、规则和 SQL 核准")
                     if args.business_date not in plan.dates or args.business_date in observations:
                         raise ToolProposalError("查询日期与任务不一致或重复")
                     raw = daily_tool.invoke(args.model_dump(mode="json"))

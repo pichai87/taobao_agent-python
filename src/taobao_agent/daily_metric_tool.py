@@ -1,5 +1,6 @@
 """One bounded daily-metric tool for the Query expert's enabled local source."""
 
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Literal, Sequence
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from taobao_agent.harness import guarded_metric_search
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition, NonEmptyText
+from taobao_agent.metric_sql import MetricQuery
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH, query_uci_metric
 
 
@@ -46,6 +48,7 @@ def make_daily_metric_tool(
     catalog: Sequence[MetricDefinition],
     *,
     uci_db_path: Path,
+    prepared_queries: Mapping[date, MetricQuery] | None = None,
 ) -> BaseTool:
     """Bind the approved UCI source; expose only metric name and date."""
 
@@ -61,7 +64,13 @@ def make_daily_metric_tool(
 
         if metric != load_metric_catalog(UCI_CATALOG_PATH)[0]:
             raise MetricNotApprovedError("指标不在 UCI 数据批准范围内")
-        amount = query_uci_metric(metric, business_date, uci_db_path)
+        if prepared_queries is None:
+            amount = query_uci_metric(metric, business_date, uci_db_path)
+        else:
+            candidate = prepared_queries.get(business_date)
+            if candidate is None:
+                raise MetricNotApprovedError("查询日期尚未生成 SQL")
+            amount = query_uci_metric(metric, business_date, uci_db_path, candidate=candidate)
 
         if amount < 0:
             raise MetricNotApprovedError("查询结果不是非负金额")

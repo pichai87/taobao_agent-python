@@ -50,9 +50,18 @@ class FakeModel:
             task = messages[1].content.split("已核准任务：指标 ", 1)[1]
             metric_name = task.split("；日期 ", 1)[0]
             dates = re.findall(r"\d{4}-\d{2}-\d{2}", task.split("；日期 ", 1)[1])
-            if not any(isinstance(item, ToolMessage) for item in messages):
+            tool_messages = [item for item in messages if isinstance(item, ToolMessage)]
+            if not tool_messages:
                 return AIMessage(content="", tool_calls=[{
                     "name": "search_metrics", "args": {"metric_name": metric_name}, "id": "search-1",
+                }])
+            if len(tool_messages) == 1:
+                return AIMessage(content="", tool_calls=[{
+                    "name": "rule_search", "args": {"metric_name": metric_name}, "id": "rule-1",
+                }])
+            if len(tool_messages) == 2:
+                return AIMessage(content="", tool_calls=[{
+                    "name": "build_sql", "args": {"metric_name": metric_name, "dates": dates}, "id": "sql-1",
                 }])
             queried = {
                 json.loads(item.content)["business_date"]
@@ -228,7 +237,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("下降 20.00 英镑", updates[3]["analysis"]["answer"])
         self.assertNotIn("58960.79", updates[3]["analysis"]["answer"])
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(len(model.tool_requests), 2)
+        self.assertEqual(len(model.tool_requests), 4)
         self.assertEqual(database_query.call_count, 2)
 
     def test_ambiguous_user_amounts_do_not_skip_query(self) -> None:
@@ -247,7 +256,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("query_evidence", updates[1]["supervisor"])
         self.assertIn("尚未配置 GMV", updates[2]["query"]["answer"])
 
-    def test_uci_comparison_asks_model_for_two_bounded_tool_calls(self) -> None:
+    def test_uci_comparison_asks_model_for_bounded_query_chain(self) -> None:
         model = FakeModel(
             "attribution", metric_name="交易明细金额",
             curr="2010-12-02", prev="2010-12-01",
@@ -260,7 +269,7 @@ class WorkflowTest(unittest.TestCase):
             )
 
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(len(model.tool_requests), 2)
+        self.assertEqual(len(model.tool_requests), 4)
         self.assertEqual(query.call_count, 2)
         self.assertIn("下降 20.00 英镑", result.answer)
 
@@ -416,7 +425,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(result["next_expert"], "query")
         self.assertIn("6.35 英镑", result["answer"])
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(len(model.tool_requests), 2)
+        self.assertEqual(len(model.tool_requests), 4)
 
     def test_main_cli_rejects_missing_uci_database_before_model(self) -> None:
         stderr = io.StringIO()
