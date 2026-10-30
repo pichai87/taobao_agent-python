@@ -1,0 +1,71 @@
+{
+  "reference_date": "2026-10-30",
+  "cases": [
+    {
+      "id": "single_day_amount",
+      "question": "2010-12-01 交易明细金额是多少？",
+      "expected_intents": ["data_query"],
+      "expected_expert": "query",
+      "expected_metric": "交易明细金额",
+      "expected_dates": ["2010-12-01"],
+      "required_answer": ["58960.79 英镑", "不是已支付 GMV"]
+    },
+    {
+      "id": "two_day_decline",
+      "question": "2010-12-02 交易明细金额为什么比 2010-12-01 下降？",
+      "expected_intents": ["attribution"],
+      "expected_expert": "analysis",
+      "expected_metric": "交易明细金额",
+      "expected_dates": ["2010-12-01", "2010-12-02"],
+      "required_answer": ["下降 11212.41 英镑", "不能判断变化原因"]
+    },
+    {
+      "id": "three_day_high_low",
+      "question": "比较 2010-12-01、2010-12-02、2010-12-03 的交易明细金额，指出哪天最高、哪天最低。",
+      "expected_intents": ["attribution"],
+      "expected_expert": "analysis",
+      "expected_metric": "交易明细金额",
+      "expected_dates": ["2010-12-01", "2010-12-02", "2010-12-03"],
+      "required_answer": ["最高为 2010-12-01", "最低为 2010-12-03"]
+    },
+    {
+      "id": "metric_metadata",
+      "question": "交易明细金额使用什么表和字段，怎么计算？",
+      "expected_intents": ["table_meta"],
+      "expected_expert": "query",
+      "expected_metric": "交易明细金额",
+      "expected_dates": [],
+      "required_answer": ["retail_lines", "line_amount_pence", "record_type=positive"]
+    },
+    {
+      "id": "metadata_and_amount",
+      "question": "交易明细金额怎么计算？2010-12-01 是多少？",
+      "expected_intents": ["table_meta", "data_query"],
+      "expected_expert": "query",
+      "expected_metric": "交易明细金额",
+      "expected_dates": ["2010-12-01"],
+      "required_answer": ["指标口径：", "查询结果：", "58960.79 英镑"]
+    },
+    {
+      "id": "unsupported_country_dimension",
+      "question": "按国家看 2010-12-01 的交易明细金额。",
+      "expected_intents": ["data_query"],
+      "expected_expert": "query",
+      "expected_metric": "交易明细金额",
+      "expected_dates": ["2010-12-01"],
+      "expected_dimensions": ["国家"],
+      "required_answer": ["不支持", "分组"],
+      "forbidden_answer": ["58960.79 英镑"]
+    },
+    {
+      "id": "unknown_metric",
+      "question": "2010-12-01 GMV 是多少？",
+      "expected_intents": ["data_query"],
+      "expected_expert": "query",
+      "expected_metric": "GMV",
+      "expected_dates": ["2010-12-01"],
+      "required_answer": ["尚未配置 GMV"],
+      "forbidden_answer": ["58960.79 英镑"]
+    }
+  ]
+}

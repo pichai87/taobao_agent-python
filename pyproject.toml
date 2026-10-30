@@ -15,6 +15,7 @@ dependencies = [
 taobao-agent = "taobao_agent.workflow:main"
 taobao-intent = "taobao_agent.intent_agent:main"
 taobao-import-uci = "taobao_agent.uci_online_retail:main"
+taobao-eval = "taobao_agent.evaluation:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14"]

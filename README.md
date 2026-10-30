@@ -11,6 +11,8 @@ uv sync
 uv run python -m unittest discover -s tests -v
 ```
 
+第 24 课新增七题业务评测入口。准备好本地 UCI SQLite 和 Plus Key 后，在同一终端运行 `TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-eval`。它逐题报告意图、路由和答案事实检查；失败退出码为 1，会产生多次模型请求。当前环境尚未运行在线七题评测。详见[第 24 课](docs/learning/lessons/24-业务Golden评测入口.md)。
+
 ## 设置模型 Key
 
 原文使用通义千问。项目通过阿里云百炼的兼容接口调用模型，默认模型是 `qwen-turbo`。在**运行项目的同一个终端**设置 Key；`read -s` 会隐藏输入，按回车结束：
