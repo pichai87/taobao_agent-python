@@ -61,6 +61,8 @@ Query 的指标查找现经由一个小型 Harness 错误边界：目录查找�
 
 ## 指标目录文件
 
+第 23 课支持一个明确的组合问法：“交易明细金额怎么计算？2010-12-01 是多少？”Intent 若识别出 `table_meta + data_query`，Supervisor 会把两项放入 `State.task_plan`，Query 依次回答口径和数值；其他尚未支持的组合会明确提示。详见[第 23 课](docs/learning/lessons/23-Supervisor组合任务计划.md)。
+
 现在也可以问“交易明细金额使用什么表和字段、怎样计算？”。Intent 若识别为 `table_meta`，Query 会在无需日期的情况下核对已批准指标与本地 SQLite 字段，再说明口径；未启用 UCI 数据源时仅说明目录记录尚未由数据库核实。详见[第 22 课](docs/learning/lessons/22-Query指标口径与表字段.md)。
 
 如果以后取得经过人工核对的指标定义，可将它们放在一个 JSON 文件中，并在运行命令的终端设置 `TAOBAO_METRIC_CATALOG_PATH` 为该文件路径。文件内容是列表，每项包含 `name`、`table`、`field`、`source`；可选的 `calculation` 记录当前支持的 `sum`、日期字段、一个等值条件和单位。当前项目**没有提供真实指标文件**；第 8 课有使用虚构表名的格式示例，第 10 课解释计算规则。

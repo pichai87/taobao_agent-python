@@ -208,6 +208,42 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("数据库已核对字段", result.answer)
         self.assertNotIn("明确的查询日期", result.answer)
 
+    def test_supervisor_plans_metadata_and_data_query_in_one_question(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "retail.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.executescript(
+                    "CREATE TABLE retail_lines (invoice_date TEXT, record_type TEXT, line_amount_pence INTEGER);"
+                    "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                    "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-01');"
+                    "INSERT INTO retail_lines VALUES ('2010-12-01', 'positive', 635);"
+                )
+            for primary, secondary in (
+                ("table_meta", "data_query"), ("data_query", "table_meta"),
+            ):
+                with self.subTest(primary=primary):
+                    model = FakeModel(
+                        primary, secondary_intents=[secondary], metric_name="交易明细金额",
+                        curr="2010-12-01",
+                    )
+                    updates = list(build_workflow(
+                        model, date(2026, 10, 30), load_metric_catalog(UCI_CATALOG_PATH),
+                        uci_db_path=database_path,
+                    ).stream({"question": "交易明细金额怎么计算？2010-12-01 是多少？"}))
+                    self.assertEqual(updates[1]["supervisor"]["task_plan"], ["table_meta", "data_query"])
+                    answer = updates[2]["query"]["answer"]
+                    self.assertIn("指标口径：", answer)
+                    self.assertIn("查询结果：", answer)
+                    self.assertIn("6.35 英镑", answer)
+                    self.assertIn("record_type=positive", answer)
+
+    def test_unsupported_secondary_intent_is_not_silently_dropped(self) -> None:
+        model = FakeModel("other", secondary_intents=["data_query"])
+        updates = list(build_workflow(model, date(2026, 10, 30)).stream({"question": "两个任务"}))
+        self.assertEqual([next(iter(update)) for update in updates], ["intent", "supervisor"])
+        self.assertEqual(updates[1]["supervisor"]["task_plan"], [])
+        self.assertIn("不支持这组复合任务", updates[1]["supervisor"]["answer"])
+
     def test_uci_two_day_comparison_runs_through_analysis_node(self) -> None:
         with TemporaryDirectory() as directory:
             database_path = Path(directory) / "retail.sqlite"

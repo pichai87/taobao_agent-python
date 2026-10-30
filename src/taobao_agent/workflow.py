@@ -18,7 +18,7 @@ from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
 from taobao_agent.query_agent import answer_query, answer_table_meta, fetch_metric_series
-from taobao_agent.supervisor import ExpertName, select_expert
+from taobao_agent.supervisor import ExpertName, TaskName, plan_tasks, select_expert
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
 
@@ -26,6 +26,7 @@ class WorkflowState(TypedDict):
     question: str
     intent: NotRequired[dict[str, object]]
     next_expert: NotRequired[ExpertName]
+    task_plan: NotRequired[list[TaskName]]
     query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
@@ -50,16 +51,31 @@ def build_workflow(
         intent = run_intent_once(state["question"], model, reference_date)
         return {"intent": intent.model_dump(mode="json")}
 
-    def supervisor_node(state: WorkflowState) -> dict[str, ExpertName]:
+    def supervisor_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
-        return {"next_expert": select_expert(intent)}
+        tasks = plan_tasks(intent)
+        if tasks is None:
+            return {
+                "next_expert": select_expert(intent),
+                "task_plan": [],
+                "answer": "当前尚不支持这组复合任务；请先分别提问。",
+            }
+        return {"next_expert": select_expert(intent), "task_plan": list(tasks)}
 
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": answer_other(state["question"])}
 
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
-        if intent.intent_type == "table_meta":
+        if state["task_plan"] == ["table_meta", "data_query"]:
+            single = intent.model_copy(update={"secondary_intents": []})
+            metadata = answer_table_meta(single, metric_catalog, uci_db_path)
+            amount = answer_query(
+                single, metric_catalog, uci_db_path=uci_db_path,
+                query_model=query_model, question=state["question"],
+            )
+            return {"answer": f"指标口径：{metadata}\n查询结果：{amount}"}
+        if state["task_plan"] == ["table_meta"]:
             return {"answer": answer_table_meta(intent, metric_catalog, uci_db_path)}
         if state["next_expert"] == "analysis":
             result = fetch_metric_series(
@@ -80,7 +96,9 @@ def build_workflow(
         evidence = MetricSeriesEvidence.model_validate(state["query_evidence"])
         return {"answer": answer_analysis_question(state["question"], evidence, analysis_model)}
 
-    def route_after_supervisor(state: WorkflowState) -> ExpertName:
+    def route_after_supervisor(state: WorkflowState) -> str:
+        if not state["task_plan"]:
+            return "done"
         if state["next_expert"] == "analysis":
             return "query"
         return state["next_expert"]
@@ -101,7 +119,7 @@ def build_workflow(
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
-        {"other": "other", "query": "query", "analysis": "query"},
+        {"other": "other", "query": "query", "analysis": "query", "done": END},
     )
     graph.add_edge("other", END)
     graph.add_conditional_edges(
