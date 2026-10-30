@@ -11,7 +11,7 @@ from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from taobao_agent.analysis_agent import MetricSeriesEvidence, answer_analysis
+from taobao_agent.analysis_agent import MetricSeriesEvidence, answer_analysis_question
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
@@ -42,6 +42,7 @@ def build_workflow(
     metric_catalog: Sequence[MetricDefinition] = (),
     uci_db_path: Path | None = None,
     query_model: ToolCallingModel | None = None,
+    analysis_model: ChatModel | None = None,
 ):
     """Compile the main graph with Query, Analysis, and Other branches."""
 
@@ -75,7 +76,7 @@ def build_workflow(
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
         evidence = MetricSeriesEvidence.model_validate(state["query_evidence"])
-        return {"answer": answer_analysis(evidence)}
+        return {"answer": answer_analysis_question(state["question"], evidence, analysis_model)}
 
     def route_after_supervisor(state: WorkflowState) -> ExpertName:
         if state["next_expert"] == "analysis":
@@ -115,13 +116,14 @@ def run_workflow(
     metric_catalog: Sequence[MetricDefinition] = (),
     uci_db_path: Path | None = None,
     query_model: ToolCallingModel | None = None,
+    analysis_model: ChatModel | None = None,
 ) -> WorkflowResult:
     """Run the active path and return the selected expert's answer."""
 
     if not question.strip():
         raise ValueError("Question must not be empty")
     state = build_workflow(
-        model, reference_date, metric_catalog, uci_db_path, query_model
+        model, reference_date, metric_catalog, uci_db_path, query_model, analysis_model
     ).invoke(
         {"question": question.strip()}
     )
@@ -158,7 +160,7 @@ def main() -> None:
     try:
         result = run_workflow(
             args.question, model, date.today(), metric_catalog, uci_db_path,
-            query_model=model,
+            query_model=model, analysis_model=model,
         )
     except ModelRateLimitError:
         parser.exit(3, "百炼返回 429：当前模型请求受到限流，本次任务未完成。\n")

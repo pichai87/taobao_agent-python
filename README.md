@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择专家 → Query 查指标与取数 → 按需交给 Analysis**。Query 可处理同一指标的单日或多个指定日期；Analysis 接收整组查询证据，计算首末及相邻日期变化。当前数据源仅批准 UCI 的“交易明细金额”，总额变化还不能证明下降原因。第 18 课的“从用户问题里匹配两笔金额并跳过 Query”已移除。阶段 2 的单节点练习位于[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择专家 → Query 查指标与取数 → 按需交给 Analysis**。Query 可处理同一指标的单日或多个指定日期；Analysis 接收整组查询证据，由模型选择受限分析任务、Python 计算数值。当前数据源仅批准 UCI 的“交易明细金额”，总额变化还不能证明下降原因。第 18 课的“从用户问题里匹配两笔金额并跳过 Query”已移除。阶段 2 的单节点练习位于[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前运行。
 
 ## 环境与验证
 
