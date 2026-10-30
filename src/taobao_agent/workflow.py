@@ -17,7 +17,7 @@ from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
-from taobao_agent.query_agent import answer_query, fetch_metric_series
+from taobao_agent.query_agent import answer_query, answer_table_meta, fetch_metric_series
 from taobao_agent.supervisor import ExpertName, select_expert
 from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
 
@@ -59,6 +59,8 @@ def build_workflow(
 
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
+        if intent.intent_type == "table_meta":
+            return {"answer": answer_table_meta(intent, metric_catalog, uci_db_path)}
         if state["next_expert"] == "analysis":
             result = fetch_metric_series(
                 intent, metric_catalog, uci_db_path=uci_db_path,

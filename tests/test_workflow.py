@@ -185,6 +185,29 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("不是已支付 GMV", result.answer)
         self.assertEqual(len(model.calls), 1)
 
+    def test_table_meta_without_date_checks_real_sqlite_columns(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "retail.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.executescript(
+                    "CREATE TABLE retail_lines (invoice_date TEXT, record_type TEXT, line_amount_pence INTEGER);"
+                    "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                    "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-02');"
+                )
+            result = run_workflow(
+                "交易明细金额使用哪个表、哪些字段？",
+                FakeModel("table_meta", metric_name="交易明细金额", curr=None),
+                date(2026, 10, 30), load_metric_catalog(UCI_CATALOG_PATH),
+                uci_db_path=database_path,
+            )
+
+        self.assertEqual(result.next_expert, "query")
+        self.assertIn("retail_lines", result.answer)
+        self.assertIn("line_amount_pence", result.answer)
+        self.assertIn("record_type=positive", result.answer)
+        self.assertIn("数据库已核对字段", result.answer)
+        self.assertNotIn("明确的查询日期", result.answer)
+
     def test_uci_two_day_comparison_runs_through_analysis_node(self) -> None:
         with TemporaryDirectory() as directory:
             database_path = Path(directory) / "retail.sqlite"

@@ -23,7 +23,7 @@ from taobao_agent.intent_agent import IntentResult
 from taobao_agent.metric_search import MetricCalculation, MetricDefinition, NonEmptyText
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.model import ToolCallingModel
-from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError
+from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError, inspect_uci_metric
 
 
 class MetricQueryPlan(BaseModel):
@@ -295,4 +295,42 @@ def answer_query(
     return (
         f"UCI Online Retail 公开数据：{amounts}"
         "（排除取消、非正数量和非正单价；不是已支付 GMV）。"
+    )
+
+
+def answer_table_meta(
+    intent: IntentResult, catalog: Sequence[MetricDefinition], uci_db_path: Path | None = None,
+) -> str:
+    """Explain an approved metric's rule and, when enabled, its actual source columns."""
+
+    if not intent.metric_name:
+        return "请说明要了解哪个指标的口径或表字段。"
+    if intent.scope or intent.dimensions:
+        return "当前表结构说明不支持指定范围或分组。"
+    try:
+        metric = guarded_metric_search(intent.metric_name, catalog)
+    except ToolUnavailableError:
+        return "指标目录暂时不可用，无法说明指标口径。"
+    if metric is None:
+        return f"尚未配置 {intent.metric_name} 的指标定义，无法说明表结构。"
+    if uci_db_path is None:
+        return (
+            f"指标目录记录：{metric.name} 对应 {metric.table}.{metric.field}，"
+            f"来源为 {metric.source}。当前未连接数据源，表字段和口径尚未核对。"
+        )
+    try:
+        profile = inspect_uci_metric(metric, uci_db_path)
+    except UCIQueryError:
+        return "UCI 公开数据的指标或表字段未通过核对，当前无法说明表结构。"
+    calculation = metric.calculation
+    if calculation is None:
+        return "指标缺少已核准的计算规则。"
+    return (
+        f"UCI Online Retail 公开数据：{metric.name} 对应表 {metric.table}，"
+        f"金额字段 {metric.field}；按 {calculation.date_field} 汇总，"
+        f"只计入 {calculation.condition.field}={calculation.condition.value} 的行，"
+        f"计算方式 {calculation.aggregation}，单位 {calculation.unit}。"
+        f"数据库已核对字段：{', '.join(profile.approved_columns)}；"
+        f"数据日期 {profile.first_date} 至 {profile.last_date}。"
+        "这不是已支付 GMV；当前没有商品、行业或访客字段。"
     )

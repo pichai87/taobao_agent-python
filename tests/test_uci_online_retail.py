@@ -16,6 +16,7 @@ from taobao_agent.uci_online_retail import (
     UCIDateOutOfRange,
     UCIQueryError,
     import_uci_online_retail,
+    inspect_uci_metric,
     query_uci_metric,
 )
 
@@ -98,6 +99,22 @@ class UCIOnlineRetailTest(unittest.TestCase):
         wrong_day = MetricQuery(approved.statement, ("2010-12-02", "positive"))
         with self.assertRaises(UCIQueryError):
             query_uci_metric(self.metric, day, self.database_path, candidate=wrong_day)
+
+    def test_metadata_rejects_unapproved_metric_or_missing_column(self) -> None:
+        import_uci_online_retail(self.workbook_path, self.database_path)
+        profile = inspect_uci_metric(self.metric, self.database_path)
+        self.assertIn("line_amount_pence", profile.approved_columns)
+        with self.assertRaises(UCIQueryError):
+            inspect_uci_metric(self.metric.model_copy(update={"source": "unknown"}), self.database_path)
+        broken_path = self.directory / "broken.sqlite"
+        with closing(sqlite3.connect(broken_path)) as connection:
+            connection.executescript(
+                "CREATE TABLE retail_lines (invoice_date TEXT, line_amount_pence INTEGER);"
+                "CREATE TABLE import_metadata (source_id TEXT, source_sha256 TEXT, first_date TEXT, last_date TEXT);"
+                "INSERT INTO import_metadata VALUES ('uci-online-retail-352', 'fixture', '2010-12-01', '2010-12-02');"
+            )
+        with self.assertRaises(UCIQueryError):
+            inspect_uci_metric(self.metric, broken_path)
 
 
 if __name__ == "__main__":

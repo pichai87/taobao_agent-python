@@ -12,6 +12,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.metric_sql import MetricQuery, build_metric_query, validate_metric_query
 
@@ -47,6 +48,37 @@ class UCIDateOutOfRange(UCIQueryError):
         self.first_date = first_date
         self.last_date = last_date
         super().__init__(f"数据日期仅覆盖 {first_date} 至 {last_date}")
+
+
+@dataclass(frozen=True)
+class UCIDataProfile:
+    first_date: str
+    last_date: str
+    approved_columns: tuple[str, ...]
+
+
+def inspect_uci_metric(metric: MetricDefinition, database_path: Path) -> UCIDataProfile:
+    """Check the imported source and actual approved columns without needing a query date."""
+
+    if metric != load_metric_catalog(UCI_CATALOG_PATH)[0]:
+        raise UCIQueryError("指标不在 UCI 数据批准范围内")
+    try:
+        database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            metadata = connection.execute(
+                "SELECT source_id, first_date, last_date FROM import_metadata"
+            ).fetchone()
+            if metadata is None or metadata[0] != SOURCE_ID:
+                raise UCIQueryError("数据库不是本项目的 UCI 导入结果")
+            actual_columns = frozenset(
+                row[1] for row in connection.execute('PRAGMA table_info("retail_lines")')
+            )
+            if not _APPROVED_COLUMNS <= actual_columns:
+                raise UCIQueryError("数据表缺少批准的字段")
+            return UCIDataProfile(metadata[1], metadata[2], tuple(sorted(_APPROVED_COLUMNS)))
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise UCIQueryError("公开数据元信息检查失败") from exc
 
 
 def _source_hash(path: Path) -> str:
