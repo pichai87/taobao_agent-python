@@ -1,71 +1,73 @@
 {
-  "reference_date": "2026-10-30",
+  "reference_date": "2026-11-01",
   "cases": [
     {
-      "id": "single_day_amount",
-      "question": "2010-12-01 交易明细金额是多少？",
-      "expected_intents": ["data_query"],
-      "expected_expert": "query",
-      "expected_metric": "交易明细金额",
-      "expected_dates": ["2010-12-01"],
-      "required_answer": ["58960.79 英镑", "不是已支付 GMV"]
-    },
-    {
-      "id": "two_day_decline",
-      "question": "2010-12-02 交易明细金额为什么比 2010-12-01 下降？",
-      "expected_intents": ["attribution"],
-      "expected_expert": "analysis",
-      "expected_metric": "交易明细金额",
-      "expected_dates": ["2010-12-01", "2010-12-02"],
-      "required_answer": ["下降 11212.41 英镑", "不能判断变化原因"]
-    },
-    {
-      "id": "three_day_high_low",
-      "question": "比较 2010-12-01、2010-12-02、2010-12-03 的交易明细金额，指出哪天最高、哪天最低。",
-      "expected_intents": ["attribution"],
-      "expected_expert": "analysis",
-      "expected_metric": "交易明细金额",
-      "expected_dates": ["2010-12-01", "2010-12-02", "2010-12-03"],
-      "required_answer": ["最高为 2010-12-01", "最低为 2010-12-03"]
-    },
-    {
-      "id": "metric_metadata",
-      "question": "交易明细金额使用什么表和字段，怎么计算？",
-      "expected_intents": ["table_meta"],
-      "expected_expert": "query",
-      "expected_metric": "交易明细金额",
-      "expected_dates": [],
-      "required_answer": ["retail_lines", "line_amount_pence", "record_type=positive"]
-    },
-    {
-      "id": "metadata_and_amount",
-      "question": "交易明细金额怎么计算？2010-12-01 是多少？",
-      "expected_intents": ["table_meta", "data_query"],
-      "expected_expert": "query",
-      "expected_metric": "交易明细金额",
-      "expected_dates": ["2010-12-01"],
-      "required_answer": ["指标口径：", "查询结果：", "58960.79 英镑"]
-    },
-    {
-      "id": "unsupported_country_dimension",
-      "question": "按国家看 2010-12-01 的交易明细金额。",
-      "expected_intents": ["data_query"],
-      "expected_expert": "query",
-      "expected_metric": "交易明细金额",
-      "expected_dates": ["2010-12-01"],
-      "expected_dimensions": ["国家"],
-      "required_answer": ["不支持", "分组"],
-      "forbidden_answer": ["58960.79 英镑"]
-    },
-    {
-      "id": "unknown_metric",
-      "question": "2010-12-01 GMV 是多少？",
+      "id": "single_day_gmv",
+      "question": "2026-10-22 百亿补贴 GMV 多少？",
       "expected_intents": ["data_query"],
       "expected_expert": "query",
       "expected_metric": "GMV",
-      "expected_dates": ["2010-12-01"],
-      "required_answer": ["尚未配置 GMV"],
-      "forbidden_answer": ["58960.79 英镑"]
+      "expected_dates": ["2026-10-22"],
+      "required_answer": ["教学合成数据", "20600.00 元"]
+    },
+    {
+      "id": "range_multi_metric_industry",
+      "question": "2026-10-21 至 2026-10-22 按行业看百亿补贴 GMV、访客数和订单数。",
+      "expected_intents": ["data_query"],
+      "expected_expert": "query",
+      "expected_metric": "GMV",
+      "expected_metrics": ["GMV", "访客数", "订单数"],
+      "expected_dates": [],
+      "expected_range": {"start": "2026-10-21", "end": "2026-10-22"},
+      "expected_dimensions": ["行业"],
+      "required_answer": ["44600.00 元", "4900 人", "446 单", "按行业分组"]
+    },
+    {
+      "id": "gmv_decline_industry",
+      "question": "2026-10-22 百亿补贴 GMV 比 2026-10-21 为什么下降？按行业拆解。",
+      "expected_intents": ["attribution"],
+      "expected_expert": "analysis",
+      "expected_metric": "GMV",
+      "expected_dates": ["2026-10-21", "2026-10-22"],
+      "expected_dimensions": ["行业"],
+      "required_answer": ["下降 3400.00 元", "转化率 10.00%→8.24%", "家电减少 3400.00 元", "不能单凭"]
+    },
+    {
+      "id": "three_day_high_low",
+      "question": "2026-10-20、2026-10-21、2026-10-22 的百亿补贴 GMV 哪天最高、哪天最低？",
+      "expected_intents": ["attribution"],
+      "expected_expert": "analysis",
+      "expected_metric": "GMV",
+      "expected_dates": ["2026-10-20", "2026-10-21", "2026-10-22"],
+      "required_answer": ["最高为", "最低为", "24000.00 元", "20600.00 元"]
+    },
+    {
+      "id": "metric_metadata",
+      "question": "百亿补贴 GMV 使用哪个表、哪个字段，如何计算？",
+      "expected_intents": ["table_meta"],
+      "expected_expert": "query",
+      "expected_metric": "GMV",
+      "expected_dates": [],
+      "required_answer": ["commerce_daily.pay_amount_cents", "activity_type=百亿补贴"]
+    },
+    {
+      "id": "metadata_and_amount",
+      "question": "百亿补贴 GMV 怎么计算？2026-10-22 是多少？",
+      "expected_intents": ["table_meta", "data_query"],
+      "expected_expert": "query",
+      "expected_metric": "GMV",
+      "expected_dates": ["2026-10-22"],
+      "required_answer": ["指标口径：", "查询结果：", "20600.00 元"]
+    },
+    {
+      "id": "unknown_metric",
+      "question": "2026-10-22 百亿补贴退款率是多少？",
+      "expected_intents": ["data_query"],
+      "expected_expert": "query",
+      "expected_metric": "退款率",
+      "expected_dates": ["2026-10-22"],
+      "required_answer": ["指标不在已批准目录", "没有返回数据"],
+      "forbidden_answer": ["退款率为"]
     }
   ]
 }

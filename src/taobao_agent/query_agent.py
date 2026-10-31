@@ -1,4 +1,4 @@
-"""The Query expert: find an approved metric and collect dated observations."""
+"""One Query expert: validate a task, call approved tools, return complete evidence."""
 
 import json
 import re
@@ -10,335 +10,333 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from taobao_agent.analysis_agent import MetricSeriesEvidence
-from taobao_agent.daily_metric_tool import (
-    DailyMetricInput,
-    DailyMetricValue,
-    MetricNotApprovedError,
-    MetricNotFoundError,
-    make_daily_metric_tool,
+from taobao_agent.commerce_data import (
+    SOURCE_ID, CommerceDataError, inspect_metric, query_metric,
 )
 from taobao_agent.harness import ToolUnavailableError, guarded_metric_search
 from taobao_agent.intent_agent import IntentResult
-from taobao_agent.metric_search import MetricCalculation, MetricDefinition, NonEmptyText
+from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.model import ToolCallingModel
-from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError, inspect_uci_metric
-from taobao_agent.uci_analytics import inspect_enriched_metric, is_enriched_catalog
 
 
-class MetricQueryPlan(BaseModel):
-    """The bounded task passed from Intent to the Query expert."""
-
+class Period(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-    metric_name: NonEmptyText
-    dates: tuple[date, ...] = Field(min_length=1, max_length=7)
+    start: date
+    end: date
 
     @model_validator(mode="after")
-    def check_dates(self) -> "MetricQueryPlan":
-        if list(self.dates) != sorted(set(self.dates)):
-            raise ValueError("dates must be distinct and increasing")
+    def check_order(self) -> "Period":
+        if self.start > self.end:
+            raise ValueError("查询时间范围倒置")
         return self
 
 
-class MetricSearchInput(BaseModel):
+class QueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    metric_names: tuple[str, ...] = Field(min_length=1, max_length=3)
+    periods: tuple[Period, ...] = Field(min_length=1, max_length=7)
+    group_by: str | None = None
+
+    @model_validator(mode="after")
+    def check_task(self) -> "QueryRequest":
+        if len(set(self.metric_names)) != len(self.metric_names):
+            raise ValueError("指标重复")
+        if self.group_by not in (None, "行业"):
+            raise ValueError("分组维度未获批准")
+        if list(self.periods) != sorted(set(self.periods), key=lambda p: (p.start, p.end)):
+            raise ValueError("查询时间段须互不重复且递增")
+        return self
+
+
+class GroupValue(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: str
+    value: int = Field(ge=0)
+
+
+class Observation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    metric_name: str
+    start: date
+    end: date
+    group_by: str | None
+    total: int = Field(ge=0)
+    groups: tuple[GroupValue, ...] = ()
+    unit: str
+    source: str
+
+    @model_validator(mode="after")
+    def check_groups(self) -> "Observation":
+        if self.source != SOURCE_ID or self.start > self.end:
+            raise ValueError("证据来源或日期无效")
+        if self.group_by is None and self.groups:
+            raise ValueError("无分组任务不能返回分组")
+        if self.group_by is not None and sum(item.value for item in self.groups) != self.total:
+            raise ValueError("分组合计与总值不一致")
+        if len({item.name for item in self.groups}) != len(self.groups):
+            raise ValueError("分组名称重复")
+        return self
+
+
+class QueryEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    request: QueryRequest
+    results: tuple[Observation, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_complete(self) -> "QueryEvidence":
+        expected = {
+            (metric, period.start, period.end, self.request.group_by)
+            for metric in self.request.metric_names for period in self.request.periods
+        }
+        actual = [(item.metric_name, item.start, item.end, item.group_by) for item in self.results]
+        if len(actual) != len(expected) or set(actual) != expected:
+            raise ValueError("查询证据缺失、重复或超出任务")
+        return self
+
+
+class MetricNamesInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    metric_name: NonEmptyText
+    metric_names: tuple[str, ...]
 
 
-class BuildSqlInput(BaseModel):
+class QueryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    metric_name: NonEmptyText
-    dates: tuple[date, ...] = Field(min_length=1, max_length=7)
+    metric_names: tuple[str, ...]
+    periods: tuple[Period, ...]
+    group_by: str | None = None
 
 
-class ToolProposalError(Exception):
-    """The model proposed a tool call outside the approved task."""
+class ToolProposalError(ValueError):
+    """The LLM proposed a tool call outside the approved query task."""
 
 
-def _validate_value(raw: object, plan: MetricQueryPlan, business_date: date) -> DailyMetricValue:
-    try:
-        value = DailyMetricValue.model_validate(raw)
-    except ValidationError as exc:
-        raise MetricNotApprovedError("工具返回值格式无效") from exc
-    if value.metric_name != plan.metric_name or value.business_date != business_date:
-        raise MetricNotApprovedError("工具返回的指标或日期与任务不一致")
-    return value
+def request_from_intent(intent: IntentResult, question: str) -> QueryRequest:
+    """Turn validated Intent fields into a bounded, explicit query task."""
 
-
-def _run_tool_loop(
-    plan: MetricQueryPlan,
-    catalog: Sequence[MetricDefinition],
-    database_path: Path,
-    model: ToolCallingModel,
-    question: str,
-) -> tuple[DailyMetricValue, ...]:
-    """Execute the approved metric, rule, SQL and read-only query chain."""
-
-    @tool("search_metrics", args_schema=MetricSearchInput)
-    def search_metric(metric_name: str) -> dict[str, object]:
-        """Find the approved table, field and calculation rule for a metric."""
-
-        found = guarded_metric_search(metric_name, catalog)
-        if found is None:
-            raise MetricNotFoundError("指标目录中没有该指标")
-        return found.model_dump(mode="json")
-
-    selected_metric: MetricDefinition | None = None
-    approved_rule: MetricCalculation | None = None
-    prepared_queries: dict[date, MetricQuery] = {}
-
-    @tool("rule_search", args_schema=MetricSearchInput)
-    def rule_search(metric_name: str) -> dict[str, object]:
-        """Read the approved calculation rule for the selected metric."""
-
-        if selected_metric is None or selected_metric.name != metric_name or selected_metric.calculation is None:
-            raise MetricNotApprovedError("指标没有已批准的计算规则")
-        return selected_metric.calculation.model_dump(mode="json")
-
-    @tool("build_sql", args_schema=BuildSqlInput)
-    def build_sql(metric_name: str, dates: tuple[date, ...]) -> dict[str, object]:
-        """Build parameterized SQL for each approved date; do not accept raw SQL."""
-
-        if selected_metric is None or selected_metric.name != metric_name:
-            raise MetricNotApprovedError("指标尚未核准")
-        candidates = {day: build_metric_query(selected_metric, day) for day in dates}
-        prepared_queries.update(candidates)
-        return {"queries": [
-            {"business_date": day.isoformat(), "statement": query.statement,
-             "parameters": list(query.parameters)}
-            for day, query in candidates.items()
-        ]}
-
-    daily_tool = make_daily_metric_tool(
-        catalog, uci_db_path=database_path, prepared_queries=prepared_queries,
-    )
-    tools: dict[str, BaseTool] = {
-        item.name: item for item in (search_metric, rule_search, build_sql, daily_tool)
+    if not intent.metric_name:
+        raise ValueError("请提供要查询的指标名称")
+    if intent.scope not in (None, "百亿补贴") or len(intent.dimensions) > 1:
+        raise ValueError("当前只支持百亿补贴范围和一个分组维度")
+    names = list(intent.metric_names or [intent.metric_name])
+    if intent.intent_type == "attribution" and intent.metric_name == "GMV":
+        names.extend(name for name in ("访客数", "订单数") if name not in names)
+    if intent.date_range:
+        if intent.intent_type == "attribution":
+            raise ValueError("变化分析请给出至少两个明确日期")
+        periods = (Period(start=intent.date_range.start, end=intent.date_range.end),)
+    else:
+        dates = intent.requested_dates()
+        if not dates:
+            raise ValueError("请提供明确的查询日期")
+        periods = tuple(Period(start=day, end=day) for day in dates)
+    explicit = set(re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", question))
+    covered = {
+        day.isoformat() for period in periods for day in (period.start, period.end)
     }
+    if not explicit.issubset(covered):
+        raise ValueError("识别出的日期与问题中明确日期不一致")
+    if intent.intent_type == "attribution" and len(periods) < 2:
+        raise ValueError("变化分析请给出至少两个明确日期")
+    return QueryRequest(metric_names=tuple(names), periods=periods,
+                        group_by=intent.dimensions[0] if intent.dimensions else None)
+
+
+def _run_tools(
+    request: QueryRequest, catalog: Sequence[MetricDefinition],
+    database_path: Path, model: ToolCallingModel, question: str,
+) -> QueryEvidence:
+    """One bounded ReAct loop; every executable query crosses the same SQL gate."""
+
+    selected: tuple[MetricDefinition, ...] = ()
+    rules_checked = False
+    prepared: dict[tuple[str, date, date], MetricQuery] = {}
+
+    @tool("search_metrics", args_schema=MetricNamesInput)
+    def search_metrics(metric_names: tuple[str, ...]) -> list[dict[str, object]]:
+        """Find approved metrics and their source table and columns."""
+        found = tuple(guarded_metric_search(name, catalog) for name in metric_names)
+        if any(metric is None for metric in found):
+            raise CommerceDataError("指标不在已批准目录中")
+        return [metric.model_dump(mode="json") for metric in found]
+
+    @tool("rule_search", args_schema=MetricNamesInput)
+    def rule_search(metric_names: tuple[str, ...]) -> list[dict[str, object]]:
+        """Read approved filters, date fields, aggregation and units."""
+        if not selected or metric_names != request.metric_names:
+            raise ToolProposalError("尚未核准指标")
+        return [metric.calculation.model_dump(mode="json") for metric in selected]
+
+    @tool("build_sql", args_schema=QueryInput)
+    def build_sql(metric_names: tuple[str, ...], periods: tuple[Period, ...],
+                  group_by: str | None = None) -> list[dict[str, object]]:
+        """Build parameterized SQL for the exact approved task."""
+        if not rules_checked or (metric_names, periods, group_by) != (
+            request.metric_names, request.periods, request.group_by
+        ):
+            raise ToolProposalError("构建 SQL 的任务与已核准请求不一致")
+        for metric in selected:
+            for period in periods:
+                prepared[(metric.name, period.start, period.end)] = build_metric_query(
+                    metric, period.start, period.end, group_by
+                )
+        return [
+            {"metric_name": key[0], "start": key[1].isoformat(), "end": key[2].isoformat(),
+             "statement": candidate.statement, "parameters": candidate.parameters}
+            for key, candidate in prepared.items()
+        ]
+
+    @tool("execute_query", args_schema=QueryInput)
+    def execute_query(metric_names: tuple[str, ...], periods: tuple[Period, ...],
+                      group_by: str | None = None) -> list[dict[str, object]]:
+        """Read the local database only after the SQL validator accepts every query."""
+        if not prepared or (metric_names, periods, group_by) != (
+            request.metric_names, request.periods, request.group_by
+        ):
+            raise ToolProposalError("执行任务与已构建 SQL 不一致")
+        results = [
+            query_metric(metric, period.start, period.end, database_path, group_by,
+                         candidate=prepared[(metric.name, period.start, period.end)])
+            for metric in selected for period in periods
+        ]
+        return [
+            {"metric_name": item.metric_name, "start": item.start.isoformat(),
+             "end": item.end.isoformat(), "group_by": item.group_by,
+             "total": item.total, "groups": [{"name": name, "value": value} for name, value in item.groups],
+             "unit": item.unit, "source": item.source}
+            for item in results
+        ]
+
+    tools: dict[str, BaseTool] = {item.name: item for item in (
+        search_metrics, rule_search, build_sql, execute_query
+    )}
     bound = model.bind_tools(list(tools.values()), tool_choice="auto")
     messages = [
         SystemMessage(content=(
-            "你是取数专家。依次调用 search_metrics、rule_search、build_sql，"
-            "最后用 query_daily_metric 查询任务中的每个日期。build_sql 一次传入全部核准日期。"
-            "只调用提供的工具，不自行编造数据、表名或 SQL；完成指定日期后停止。"
+            "你是取数专家。只按已批准请求依次调用 search_metrics、rule_search、build_sql、"
+            "execute_query，每轮只调用一个工具；执行后停止。不能改指标、日期、维度、SQL 或数据库路径。"
         )),
         HumanMessage(content=(
-            f"用户问题：{question}\n已核准任务：指标 {plan.metric_name}；"
-            f"日期 {', '.join(day.isoformat() for day in plan.dates)}。"
+            f"用户问题：{question}\n已批准请求："
+            f"{json.dumps(request.model_dump(mode='json'), ensure_ascii=False)}"
         )),
     ]
-    searched = False
-    rule_found = False
-    sql_built = False
-    observations: dict[date, DailyMetricValue] = {}
-    call_count = 0
-    for _ in range(12):
-        response = bound.invoke(messages)
-        if not isinstance(response, AIMessage) or response.invalid_tool_calls or not response.tool_calls:
-            raise ToolProposalError("模型未提出有效工具调用")
-        messages.append(response)
-        for proposal in response.tool_calls:
-            call_count += 1
-            if call_count > 12:
-                raise ToolProposalError("工具调用超过上限")
-            name, raw_args, call_id = proposal.get("name"), proposal.get("args"), proposal.get("id")
-            if name not in tools or not isinstance(call_id, str) or not call_id:
-                raise ToolProposalError("工具调用名称或编号无效")
-            try:
-                if name == "search_metrics":
-                    args = MetricSearchInput.model_validate(raw_args)
-                    if args.metric_name != plan.metric_name or searched:
-                        raise ToolProposalError("指标查找与任务不一致或重复")
-                    result = search_metric.invoke(args.model_dump(mode="json"))
-                    metric = MetricDefinition.model_validate(result)
-                    if metric.name != plan.metric_name:
-                        raise ToolProposalError("指标查找结果与任务不一致")
-                    if metric.name != "交易明细金额" or metric.calculation is None or metric.calculation.unit != "pence":
-                        raise MetricNotApprovedError("当前数据源不支持该指标")
-                    selected_metric = metric
-                    searched = True
-                    tool_result = metric.model_dump(mode="json")
-                elif name == "rule_search":
-                    args = MetricSearchInput.model_validate(raw_args)
-                    if not searched or rule_found or args.metric_name != plan.metric_name:
-                        raise ToolProposalError("计算规则查找顺序或指标不正确")
-                    rule = MetricCalculation.model_validate(rule_search.invoke(args.model_dump(mode="json")))
-                    if selected_metric is None or rule != selected_metric.calculation:
-                        raise ToolProposalError("计算规则与指标定义不一致")
-                    approved_rule = rule
-                    rule_found = True
-                    tool_result = rule.model_dump(mode="json")
-                elif name == "build_sql":
-                    args = BuildSqlInput.model_validate(raw_args)
-                    if not rule_found or sql_built or args.metric_name != plan.metric_name or args.dates != plan.dates:
-                        raise ToolProposalError("SQL 构建顺序、指标或日期与任务不一致")
-                    if selected_metric is None or approved_rule != selected_metric.calculation:
-                        raise ToolProposalError("SQL 构建缺少已核准规则")
-                    tool_result = build_sql.invoke(args.model_dump(mode="json"))
-                    if set(prepared_queries) != set(plan.dates):
-                        raise ToolProposalError("SQL 构建结果缺少日期")
-                    sql_built = True
-                else:
-                    args = DailyMetricInput.model_validate(raw_args)
-                    if not sql_built or args.metric_name != plan.metric_name:
-                        raise ToolProposalError("查询前未完成指标、规则和 SQL 核准")
-                    if args.business_date not in plan.dates or args.business_date in observations:
-                        raise ToolProposalError("查询日期与任务不一致或重复")
-                    raw = daily_tool.invoke(args.model_dump(mode="json"))
-                    value = _validate_value(raw, plan, args.business_date)
-                    observations[args.business_date] = value
-                    tool_result = value.model_dump(mode="json")
-            except ValidationError as exc:
-                raise ToolProposalError("工具参数或查找结果格式无效") from exc
-            messages.append(ToolMessage(
-                content=json.dumps(tool_result, ensure_ascii=False), tool_call_id=call_id,
-            ))
-        if len(observations) == len(plan.dates):
-            return tuple(observations[day] for day in plan.dates)
-    raise ToolProposalError("取数任务未在执行上限内完成")
-
-
-def fetch_metric_series(
-    intent: IntentResult,
-    catalog: Sequence[MetricDefinition],
-    uci_db_path: Path | None = None,
-    query_model: ToolCallingModel | None = None,
-    question: str = "",
-) -> MetricSeriesEvidence | str:
-    """Return all requested observations together, or no partial evidence."""
-
-    if not intent.metric_name:
-        return "请提供要查询的指标名称；当前没有执行取数。"
-    dates = intent.requested_dates()
-    if not dates:
-        return "请提供明确的查询日期；当前没有执行取数。"
-    explicit_dates = set(re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", question))
-    if not explicit_dates.issubset({day.isoformat() for day in dates}):
-        return "意图识别的日期与问题中明确写出的日期不一致；当前没有执行取数。"
-    if intent.scope or intent.dimensions or intent.secondary_intents:
-        return "当前数据源暂不支持指定范围、分组或复合任务；当前没有执行取数。"
-    try:
-        plan = MetricQueryPlan(metric_name=intent.metric_name, dates=dates)
-    except ValidationError:
-        return "请提供不超过 7 个、互不重复且按时间递增的日期；当前没有执行取数。"
-    if intent.intent_type == "attribution" and len(plan.dates) < 2:
-        return "请提供至少两个不同的明确日期；当前没有执行分析。"
-
-    if uci_db_path is None:
-        try:
-            metric = guarded_metric_search(plan.metric_name, catalog)
-        except ToolUnavailableError:
-            return "指标目录暂时不可用；当前没有执行取数。"
-        if metric is None:
-            return f"尚未配置 {plan.metric_name} 的指标定义；当前没有执行取数。"
-        return "已找到指标定义，但当前没有启用可查询的数据源；无法返回数值。"
-
-    try:
-        if query_model is None:
-            metric = guarded_metric_search(plan.metric_name, catalog)
-            if metric is None:
-                return f"尚未配置 {plan.metric_name} 的指标定义；当前没有执行取数。"
-            if metric.name != "交易明细金额" or metric.calculation is None or metric.calculation.unit != "pence":
-                return "UCI 公开数据模式目前只支持交易明细金额。"
-            daily_tool = make_daily_metric_tool(catalog, uci_db_path=uci_db_path)
-            values = tuple(
-                _validate_value(daily_tool.invoke({
-                    "metric_name": plan.metric_name, "business_date": day.isoformat(),
-                }), plan, day)
-                for day in plan.dates
+    expected = ("search_metrics", "rule_search", "build_sql", "execute_query")
+    for index, name in enumerate(expected):
+        expected_args: dict[str, object] = {"metric_names": list(request.metric_names)}
+        if index >= 2:
+            expected_args.update(
+                periods=[period.model_dump(mode="json") for period in request.periods],
+                group_by=request.group_by,
             )
-        else:
-            values = _run_tool_loop(plan, catalog, uci_db_path, query_model, question)
-        return MetricSeriesEvidence(metric_name=plan.metric_name, values=values)
-    except UCIDateOutOfRange as exc:
-        return f"UCI Online Retail 数据日期仅覆盖 {exc.first_date} 至 {exc.last_date}；当前没有返回数值。"
-    except MetricNotFoundError:
-        return f"尚未配置 {plan.metric_name} 的指标定义；当前没有执行取数。"
-    except MetricNotApprovedError:
-        return "UCI 公开数据查询未通过指标审批或执行校验；当前没有返回数值。"
-    except (UCIQueryError, ToolUnavailableError, ToolProposalError, ValidationError):
-        return "UCI 公开数据查询未通过校验或执行失败；当前没有返回数值。"
-
-
-def answer_query(
-    intent: IntentResult,
-    catalog: Sequence[MetricDefinition],
-    uci_db_path: Path | None = None,
-    query_model: ToolCallingModel | None = None,
-    question: str = "",
-) -> str:
-    """Answer a dated query, or show available metadata when no source is enabled."""
-
-    if uci_db_path is None:
-        if not intent.metric_name:
-            return "请提供要查询的指标名称。"
+        for attempt in range(3):
+            response = bound.invoke(messages)
+            if not isinstance(response, AIMessage):
+                raise ToolProposalError(f"{name} 阶段模型没有返回可识别的工具消息")
+            if not response.invalid_tool_calls and len(response.tool_calls) == 1:
+                break
+            if attempt == 2:
+                raise ToolProposalError(f"{name} 阶段连续三次没有提出有效的单个工具调用")
+            messages.append(HumanMessage(content=(
+                f"刚才的 {name} 工具调用格式无效。下一步只调用 {name}，"
+                f"参数严格使用这个 JSON 对象：{json.dumps(expected_args, ensure_ascii=False)}。"
+                "不要输出普通文本，不要增加字段。"
+            )))
+        proposal = response.tool_calls[0]
+        if proposal.get("name") != name or not proposal.get("id"):
+            actual = proposal.get("name") if proposal.get("name") in tools else "未知工具"
+            raise ToolProposalError(f"预期调用 {name}，实际调用 {actual} 或编号无效")
+        messages.append(response)
         try:
-            metric = guarded_metric_search(intent.metric_name, catalog)
-        except ToolUnavailableError:
-            return "指标目录暂时不可用，请稍后重试。当前没有执行数据查询。"
-        if metric is None:
-            return f"尚未配置 {intent.metric_name} 的指标定义，无法查询数据。"
-        return (
-            f"已找到指标定义：{metric.name} → {metric.table}.{metric.field}"
-            f"（来源：{metric.source}）。当前尚未接入数据查询，无法返回数值。"
-        )
+            if name in ("search_metrics", "rule_search"):
+                args = MetricNamesInput.model_validate(proposal.get("args"))
+                if args.metric_names != request.metric_names:
+                    raise ToolProposalError("工具指标与任务不一致")
+                output = tools[name].invoke(args.model_dump(mode="json"))
+                if name == "search_metrics":
+                    selected = tuple(MetricDefinition.model_validate(item) for item in output)
+                    if tuple(metric.name for metric in selected) != request.metric_names:
+                        raise ToolProposalError("指标查找结果与任务不一致")
+                else:
+                    if output != [metric.calculation.model_dump(mode="json") for metric in selected]:
+                        raise ToolProposalError("规则查找结果与指标不一致")
+                    rules_checked = True
+            else:
+                args = QueryInput.model_validate(proposal.get("args"))
+                if (args.metric_names, args.periods, args.group_by) != (
+                    request.metric_names, request.periods, request.group_by
+                ):
+                    raise ToolProposalError("工具查询范围与任务不一致")
+                output = tools[name].invoke(args.model_dump(mode="json"))
+            messages.append(ToolMessage(content=json.dumps(output, ensure_ascii=False),
+                                        tool_call_id=proposal["id"]))
+        except ValidationError as exc:
+            raise ToolProposalError("工具参数或结果格式无效") from exc
+        if index == 3:
+            results = tuple(Observation.model_validate(item) for item in output)
+            return QueryEvidence(request=request, results=results)
+    raise ToolProposalError("取数未完成")
 
-    result = fetch_metric_series(intent, catalog, uci_db_path, query_model, question)
-    if isinstance(result, str):
-        return result
-    amounts = "，".join(
-        f"{value.business_date.isoformat()} 的{value.metric_name}为 "
-        f"{value.amount_minor // 100}.{value.amount_minor % 100:02d} 英镑"
-        for value in result.values
-    )
-    return (
-        f"UCI Online Retail 公开数据：{amounts}"
-        "（排除取消、非正数量和非正单价；不是已支付 GMV）。"
-    )
+
+def fetch_query_evidence(
+    intent: IntentResult, question: str, catalog: Sequence[MetricDefinition],
+    database_path: Path, model: ToolCallingModel,
+) -> QueryEvidence | str:
+    """Return complete verified evidence, or a constrained explanation without partial data."""
+
+    try:
+        request = request_from_intent(intent, question)
+        return _run_tools(request, catalog, database_path, model, question)
+    except (ValueError, CommerceDataError, ToolUnavailableError) as exc:
+        if isinstance(exc, ToolProposalError):
+            return f"取数专家的工具调用未通过顺序或参数校验（{exc}）；没有返回数据。"
+        if isinstance(exc, CommerceDataError):
+            return f"查询未完成：{exc}；没有返回数据。"
+        return f"查询未完成：{exc}；没有返回数据。"
 
 
-def answer_table_meta(
-    intent: IntentResult, catalog: Sequence[MetricDefinition], uci_db_path: Path | None = None,
-) -> str:
-    """Explain an approved metric's rule and, when enabled, its actual source columns."""
+def _display(value: int, unit: str) -> str:
+    if unit == "cents":
+        return f"{value // 100}.{value % 100:02d} 元"
+    return f"{value} {unit}"
+
+
+def answer_query(evidence: QueryEvidence, *, include_supporting: bool = True) -> str:
+    """Format values from Query evidence; no number is supplied by the model."""
+
+    parts = []
+    for item in evidence.results:
+        if not include_supporting and item.metric_name != evidence.request.metric_names[0]:
+            continue
+        period = item.start.isoformat() if item.start == item.end else f"{item.start} 至 {item.end}"
+        detail = f"{period} 的{item.metric_name}为 {_display(item.total, item.unit)}"
+        if item.group_by:
+            ranked = sorted(item.groups, key=lambda group: (-group.value, group.name))
+            detail += "；按行业分组：" + "、".join(
+                f"{group.name} {_display(group.value, item.unit)}" for group in ranked
+            )
+        parts.append(detail)
+    return "教学合成数据（百亿补贴）：" + "；".join(parts) + "。"
+
+
+def answer_table_meta(intent: IntentResult, catalog: Sequence[MetricDefinition],
+                      database_path: Path) -> str:
+    """Describe only an approved metric and verified physical columns."""
 
     if not intent.metric_name:
-        return "请说明要了解哪个指标的口径或表字段。"
-    if intent.scope or intent.dimensions:
-        return "当前表结构说明不支持指定范围或分组。"
-    try:
-        metric = guarded_metric_search(intent.metric_name, catalog)
-    except ToolUnavailableError:
-        return "指标目录暂时不可用，无法说明指标口径。"
+        return "请指定要查看口径的指标。"
+    metric = guarded_metric_search(intent.metric_name, catalog)
     if metric is None:
-        return f"尚未配置 {intent.metric_name} 的指标定义，无法说明表结构。"
-    if uci_db_path is None:
-        return (
-            f"指标目录记录：{metric.name} 对应 {metric.table}.{metric.field}，"
-            f"来源为 {metric.source}。当前未连接数据源，表字段和口径尚未核对。"
-        )
+        return f"未配置 {intent.metric_name} 的指标定义。"
     try:
-        profile = (
-            inspect_enriched_metric(metric, uci_db_path)
-            if is_enriched_catalog(catalog) else inspect_uci_metric(metric, uci_db_path)
-        )
-    except UCIQueryError:
-        return "UCI 公开数据的指标或表字段未通过核对，当前无法说明表结构。"
-    calculation = metric.calculation
-    if calculation is None:
-        return "指标缺少已核准的计算规则。"
+        first, last, fields = inspect_metric(metric, database_path)
+    except CommerceDataError:
+        return "指标目录与数据库结构未通过核对。"
+    rule = metric.calculation
     return (
-        f"UCI Online Retail 公开数据：{metric.name} 对应表 {metric.table}，"
-        f"指标字段 {metric.field}；按 {calculation.date_field} 汇总，"
-        f"只计入 {calculation.condition.field}={calculation.condition.value} 的行，"
-        f"计算方式 {calculation.aggregation}，单位 {calculation.unit}。"
-        f"数据库已核对字段：{', '.join(profile.approved_columns)}；"
-        f"数据日期 {profile.first_date} 至 {profile.last_date}。"
-        + (
-            "这不是已支付 GMV；有国家和商品编码字段，没有行业、访客或支付字段。"
-            if is_enriched_catalog(catalog)
-            else "这不是已支付 GMV；当前没有商品、行业或访客字段。"
-        )
+        f"教学合成数据：{metric.name} 对应 {metric.table}.{metric.field}，"
+        f"按 {rule.date_field} 汇总，只计 {rule.condition.field}={rule.condition.value}，"
+        f"聚合方式 {rule.aggregation}，单位 {rule.unit}；"
+        f"数据库已核对字段 {', '.join(fields)}，日期覆盖 {first} 至 {last}。"
     )

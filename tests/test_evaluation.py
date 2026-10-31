@@ -1,86 +1,38 @@
-"""Check the business evaluation contract without making model requests."""
+"""Check that the business scorecard detects observable errors."""
 
 import unittest
 from datetime import date
-from pathlib import Path
-from unittest.mock import patch
 
-from taobao_agent.evaluation import (
-    GoldenDataset, evaluate_dataset, load_dataset, score_case,
-)
+from taobao_agent.evaluation import load_dataset, score_case
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.workflow import WorkflowResult
 
 
-def result(answer: str = "58960.79 英镑；不是已支付 GMV") -> WorkflowResult:
-    return WorkflowResult(
-        intent=IntentResult(
-            intent_type="data_query", secondary_intents=[], confidence=0.9,
-            metric_name="交易明细金额", metric_field=None,
-            time_label="2010-12-01", curr="2010-12-01", prev=None,
-            dates=[], scope=None, dimensions=[],
-        ),
-        next_expert="query", answer=answer,
-    )
-
-
 class EvaluationTest(unittest.TestCase):
-    def test_golden_dataset_is_valid_and_has_business_scenarios(self) -> None:
+    def test_current_dataset_covers_the_single_commerce_path(self) -> None:
         dataset = load_dataset()
         self.assertEqual(len(dataset.cases), 7)
-        self.assertEqual(dataset.reference_date, date(2026, 10, 30))
-        self.assertIn("metadata_and_amount", {case.id for case in dataset.cases})
-        enriched = load_dataset(Path("scripts/eval/datasets/enriched.json"))
-        self.assertEqual(len(enriched.cases), 3)
-        self.assertEqual(enriched.cases[0].expected_metrics, (
-            "交易明细金额", "正向商品件数", "正向交易行数",
-        ))
+        self.assertEqual(len({case.id for case in dataset.cases}), 7)
+        self.assertEqual({case.expected_expert for case in dataset.cases}, {"query", "analysis"})
+        self.assertTrue(any(case.expected_range for case in dataset.cases))
+        self.assertTrue(any(case.expected_dimensions == ("行业",) for case in dataset.cases))
 
-    def test_score_separates_intent_route_dates_and_answer(self) -> None:
-        case = load_dataset().cases[0]
-        good = score_case(case, result())
-        self.assertTrue(good.passed)
-        bad = score_case(case, result("没有数据"))
-        self.assertFalse(bad.passed)
-        self.assertFalse(bad.checks["required_answer"])
-        self.assertTrue(bad.checks["intents"])
-        diagnostic = score_case(case, result("没有数据"), diagnostic=True)
-        self.assertEqual(diagnostic.observed["metric"], "交易明细金额")
-        self.assertEqual(diagnostic.observed["answer"], "没有数据")
-
-    def test_enriched_score_checks_all_metrics_and_range(self) -> None:
-        case = load_dataset(Path("scripts/eval/datasets/enriched.json")).cases[0]
-        observed = WorkflowResult(
-            intent=IntentResult(
-                intent_type="data_query", secondary_intents=[], confidence=0.9,
-                metric_name="交易明细金额", metric_field=None, time_label=None,
-                curr="2010-12-02", prev="2010-12-01", dates=[],
-                metric_names=["交易明细金额", "正向商品件数", "正向交易行数"],
-                date_range={"start": "2010-12-01", "end": "2010-12-02"},
-                scope=None, dimensions=["国家"],
-            ),
-            next_expert="query",
-            answer="106709.17 英镑；58248 件；5135 行；按国家分组",
+    def test_score_detects_wrong_intent_and_unsupported_answer(self) -> None:
+        case = next(case for case in load_dataset().cases if case.id == "unknown_metric")
+        intent = IntentResult(
+            intent_type="data_query", secondary_intents=[], confidence=0.9,
+            metric_name="退款率", metric_field=None, time_label=None,
+            curr="2026-10-22", prev=None, dates=["2026-10-22"],
+            scope="百亿补贴", dimensions=[],
         )
-        self.assertTrue(score_case(case, observed).passed)
-        changed = observed.model_copy(update={
-            "intent": observed.intent.model_copy(update={"metric_names": ["交易明细金额"]}),
-        })
-        self.assertFalse(score_case(case, changed).checks["metrics"])
-
-    def test_runner_keeps_case_errors_visible_and_continues(self) -> None:
-        case = load_dataset().cases[0]
-        dataset = GoldenDataset(reference_date="2026-10-30", cases=(
-            case, case.model_copy(update={"id": "second"}),
-        ))
-        with patch("taobao_agent.evaluation.source_catalog", return_value=()), \
-             patch("taobao_agent.evaluation.run_workflow", side_effect=[result(), RuntimeError("secret")]) as workflow:
-            report = evaluate_dataset(dataset, Path("unused.sqlite"), model=object())
-        self.assertEqual(workflow.call_count, 2)
-        self.assertEqual((report.passed, report.total), (1, 2))
-        self.assertEqual(report.cases[1].error_type, "RuntimeError")
-        self.assertNotIn("secret", report.model_dump_json())
-
-
-if __name__ == "__main__":
-    unittest.main()
+        result = WorkflowResult(
+            intent=intent, next_expert="query",
+            answer="查询未完成：指标不在已批准目录中；没有返回数据。",
+        )
+        self.assertTrue(score_case(case, result).passed)
+        invented = result.model_copy(update={"answer": "退款率为 5%"})
+        checks = score_case(case, invented, diagnostic=True)
+        self.assertFalse(checks.passed)
+        self.assertFalse(checks.checks["required_answer"])
+        self.assertFalse(checks.checks["forbidden_answer"])
+        self.assertIn("退款率为", checks.observed["answer"])

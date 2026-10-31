@@ -1,0 +1,38 @@
+[
+  {
+    "name": "GMV",
+    "table": "commerce_daily",
+    "field": "pay_amount_cents",
+    "source": "synthetic-commerce-v1",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "biz_date",
+      "condition": {"field": "activity_type", "value": "百亿补贴"},
+      "unit": "cents"
+    }
+  },
+  {
+    "name": "访客数",
+    "table": "commerce_daily",
+    "field": "visitor_uv",
+    "source": "synthetic-commerce-v1",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "biz_date",
+      "condition": {"field": "activity_type", "value": "百亿补贴"},
+      "unit": "人"
+    }
+  },
+  {
+    "name": "订单数",
+    "table": "commerce_daily",
+    "field": "order_count",
+    "source": "synthetic-commerce-v1",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "biz_date",
+      "condition": {"field": "activity_type", "value": "百亿补贴"},
+      "unit": "单"
+    }
+  }
+]

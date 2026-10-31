@@ -146,7 +146,8 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date) -> In
         "如果也填写 dates，必须从范围首日到末日按日期升序列出。"
         "若 dates 非空，首项须与非空 prev 一致，末项须与非空 curr 一致。"
         "日期用 YYYY-MM-DD 字符串，没有明确或可解析的日期就填 null，dates 没有则为空数组。"
-        "scope 只写用户明确指定的范围，否则为 null。dimensions 是用户明确要求的分组维度数组，"
+        "当前默认业务范围是百亿补贴；用户明确说百亿补贴时 scope 可写百亿补贴，"
+        "没有明确指定则为 null。dimensions 是用户明确要求的分组维度数组，"
         "没有则为空数组。其他缺失字段均用 null。"
         f"今天的参考日期是 {reference_date.isoformat()}，用于解析昨天、前天等相对日期。"
     )

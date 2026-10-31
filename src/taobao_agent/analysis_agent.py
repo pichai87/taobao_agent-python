@@ -1,4 +1,4 @@
-"""Choose an analysis task from verified evidence; calculate values in Python."""
+"""Analyze complete Query evidence; never read the database from Analysis."""
 
 import json
 from decimal import Decimal, ROUND_HALF_UP
@@ -6,133 +6,148 @@ from typing import Literal
 
 from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from taobao_agent.daily_metric_tool import DailyMetricValue
 from taobao_agent.model import ChatModel
+from taobao_agent.query_agent import Observation, QueryEvidence, _display
 
 
 class AnalysisPlan(BaseModel):
-    """The only analytical choice an LLM may make for the current source."""
-
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["overall_change", "largest_daily_drop", "high_low"]
 
 
-class MetricSeriesEvidence(BaseModel):
-    """One metric, one source and a nonempty set of dated observations."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    metric_name: str
-    values: tuple[DailyMetricValue, ...] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def check_series(self) -> "MetricSeriesEvidence":
-        dates = [value.business_date for value in self.values]
-        if dates != sorted(set(dates)):
-            raise ValueError("series dates must be distinct and increasing")
-        if any(value.metric_name != self.metric_name for value in self.values):
-            raise ValueError("series contains a different metric")
-        if len({(value.source, value.unit) for value in self.values}) != 1:
-            raise ValueError("series contains mixed sources or units")
-        return self
+def _percent(numerator: Decimal, denominator: Decimal) -> str:
+    if denominator == 0:
+        return "无法计算（基期为零）"
+    value = abs(numerator) * 100 / denominator
+    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):.2f}%"
 
 
-def _money(minor_units: int) -> str:
-    return f"{minor_units // 100}.{minor_units % 100:02d}"
-
-
-def answer_analysis(evidence: MetricSeriesEvidence) -> str:
-    """Report each observed amount and the first-to-last change."""
-
-    values = evidence.values
-    if len(values) < 2:
-        raise ValueError("analysis requires at least two dates")
-    first, last = values[0], values[-1]
-    difference = last.amount_minor - first.amount_minor
-    direction = "下降" if difference < 0 else "上升" if difference > 0 else "持平"
-    if first.amount_minor == 0:
-        change = "基期金额为 0，变化率无法计算"
-    else:
-        rate = (Decimal(abs(difference)) * 100 / Decimal(first.amount_minor)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        change = f"变化率 {rate:.2f}%"
-
-    amounts = "，".join(
-        f"{value.business_date.isoformat()}{' 的' + evidence.metric_name + '为' if index == 0 else ' 为'} "
-        f"{_money(value.amount_minor)} 英镑"
-        for index, value in enumerate(values)
+def _group_contribution(first: Observation, last: Observation) -> str:
+    if first.group_by is None:
+        return ""
+    before = {item.name: item.value for item in first.groups}
+    after = {item.name: item.value for item in last.groups}
+    changes = {name: after.get(name, 0) - before.get(name, 0) for name in before.keys() | after.keys()}
+    overall = last.total - first.total
+    if sum(changes.values()) != overall:
+        raise ValueError("行业贡献与总体变化不一致")
+    if overall == 0:
+        return "各行业的变化合计为零；这是数值拆解，不能据此证明经营原因。"
+    ranked = sorted(changes.items(), key=lambda pair: pair[1], reverse=overall > 0)
+    relevant = [(name, delta) for name, delta in ranked if delta * overall > 0][:3]
+    details = "；".join(
+        f"{name}{'增加' if delta > 0 else '减少'} {_display(abs(delta), first.unit)}"
+        f"（占总体净{'增' if overall > 0 else '降'}幅 {_percent(Decimal(delta), Decimal(abs(overall)))}）"
+        for name, delta in relevant
     )
-    period = "" if len(values) == 2 else "首末"
-    adjacent = ""
-    if len(values) > 2:
-        steps = []
-        for previous, current in zip(values, values[1:]):
-            delta = current.amount_minor - previous.amount_minor
-            movement = "下降" if delta < 0 else "上升" if delta > 0 else "持平"
-            steps.append(
-                f"{previous.business_date.isoformat()}→{current.business_date.isoformat()} "
-                f"{movement} {_money(abs(delta))} 英镑"
-            )
-        adjacent = "；相邻日期变化：" + "，".join(steps)
+    return f"按行业拆解：{details}。这是数值贡献，不能单凭它证明经营原因。"
+
+
+def _find(evidence: QueryEvidence, name: str, index: int) -> Observation | None:
+    period = evidence.request.periods[index]
+    return next((item for item in evidence.results if item.metric_name == name
+                 and item.start == period.start and item.end == period.end), None)
+
+
+def _funnel(evidence: QueryEvidence) -> str:
+    if evidence.request.metric_names[0] != "GMV" or len(evidence.request.periods) != 2:
+        return ""
+    first_uv, last_uv = _find(evidence, "访客数", 0), _find(evidence, "访客数", 1)
+    first_orders, last_orders = _find(evidence, "订单数", 0), _find(evidence, "订单数", 1)
+    first_gmv, last_gmv = _find(evidence, "GMV", 0), _find(evidence, "GMV", 1)
+    if not all((first_uv, last_uv, first_orders, last_orders, first_gmv, last_gmv)):
+        return ""
+    u0, u1 = Decimal(first_uv.total), Decimal(last_uv.total)
+    o0, o1 = Decimal(first_orders.total), Decimal(last_orders.total)
+    g0, g1 = Decimal(first_gmv.total), Decimal(last_gmv.total)
+    if min(u0, u1, o0, o1) == 0:
+        return "访客数或订单数为零，无法计算完整漏斗拆解。"
+    c0, c1 = o0 / u0, o1 / u1
+    a0, a1 = g0 / o0, g1 / o1
+    effects = {
+        "访客数": (u1 - u0) * c0 * a0,
+        "转化率": u1 * (c1 - c0) * a0,
+        "客单价": u1 * c1 * (a1 - a0),
+    }
+    if abs(sum(effects.values()) - (g1 - g0)) > Decimal("0.0001"):
+        raise ValueError("漏斗拆解无法对齐 GMV")
+    effects_text = "、".join(
+        f"{name}{'增加' if value > 0 else '减少' if value < 0 else '不变'} "
+        f"{_display(int(abs(value).quantize(Decimal('1'), rounding=ROUND_HALF_UP)), 'cents')}"
+        for name, value in effects.items()
+    )
     return (
-        f"UCI Online Retail 公开数据：{amounts}；{period}{direction} "
-        f"{_money(abs(difference))} 英镑，{change}{adjacent}。"
-        "这是排除取消、非正数量和非正单价后的交易明细金额，不是已支付 GMV；"
-        "仅凭总额不能判断变化原因。"
+        f"漏斗核算：GMV = 访客数 × 转化率 × 客单价；"
+        f"访客数 {int(u0)}→{int(u1)} 人，转化率 {c0 * 100:.2f}%→{c1 * 100:.2f}%，"
+        f"客单价 {_display(int(a0), 'cents')}→{_display(int(a1), 'cents')}。"
+        f"按访客数、转化率、客单价的顺序做数值拆解：{effects_text}；"
+        "拆解结果依赖计算顺序，不等于已经证实的因果原因。"
     )
 
 
 def answer_analysis_question(
-    question: str, evidence: MetricSeriesEvidence, model: ChatModel | None = None,
+    question: str, evidence: QueryEvidence, model: ChatModel | None = None,
 ) -> str:
-    """Let the model select a supported analysis, then calculate and phrase it locally."""
+    """Let the model choose a supported view; calculate every value in Python."""
 
-    base = answer_analysis(evidence)
-    if model is None:
-        return base
-    facts = [
-        {"date": value.business_date.isoformat(), "amount_pence": value.amount_minor}
-        for value in evidence.values
-    ]
-    try:
-        response = model.invoke([
-            SystemMessage(content=(
-                "你是分析专家。仅从三种任务中选择用户最想看的分析方式："
-                "overall_change（首末变化或问原因）、largest_daily_drop（最大相邻日下降）、"
-                "high_low（最高和最低日期）。只输出 JSON 对象 {\"mode\": \"...\"}；"
-                "不要输出结论、金额或原因，程序会根据已核实证据计算。"
-            )),
-            HumanMessage(content=(
-                f"用户问题：{question}\n已核实证据："
-                f"{json.dumps(facts, ensure_ascii=False)}"
-            )),
-        ])
-        if not isinstance(response.content, str):
-            raise ValueError("analysis model did not return JSON text")
-        plan = AnalysisPlan.model_validate_json(response.content)
-    except (ModelRateLimitError, ValidationError, ValueError):
-        return base
-
-    if plan.mode == "overall_change":
-        return base
-    if plan.mode == "largest_daily_drop":
-        changes = [
-            (previous, current, previous.amount_minor - current.amount_minor)
-            for previous, current in zip(evidence.values, evidence.values[1:])
-        ]
-        previous, current, drop = max(changes, key=lambda item: item[2])
-        if drop <= 0:
-            return base + " 指定日期之间没有相邻日下降。"
-        return (
-            base + f" 最大相邻日下降发生在 {previous.business_date.isoformat()}→"
-            f"{current.business_date.isoformat()}，下降 {_money(drop)} 英镑。"
-        )
-    highest = max(evidence.values, key=lambda item: item.amount_minor)
-    lowest = min(evidence.values, key=lambda item: item.amount_minor)
-    return (
-        base + f" 最高为 {highest.business_date.isoformat()} 的 {_money(highest.amount_minor)} 英镑；"
-        f"最低为 {lowest.business_date.isoformat()} 的 {_money(lowest.amount_minor)} 英镑。"
+    if len(evidence.request.periods) < 2 or any(
+        period.start != period.end for period in evidence.request.periods
+    ):
+        raise ValueError("分析需要至少两个明确的单日查询结果")
+    metric_name = evidence.request.metric_names[0]
+    values = [_find(evidence, metric_name, index) for index in range(len(evidence.request.periods))]
+    if any(value is None for value in values):
+        raise ValueError("分析缺少查询证据")
+    mode = "overall_change"
+    if model is not None:
+        try:
+            response = model.invoke([
+                SystemMessage(content=(
+                    "你是分析专家。只选择一个 JSON 计划："
+                    "overall_change（变化或问原因）、largest_daily_drop（最大相邻日下降）、"
+                    "high_low（最高和最低）。输出 {\"mode\":\"...\"}，不要编造数值或原因。"
+                )),
+                HumanMessage(content=(
+                    f"用户问题：{question}\n已核实金额："
+                    f"{json.dumps([{'date': item.start.isoformat(), 'value': item.total} for item in values], ensure_ascii=False)}"
+                )),
+            ])
+            if not isinstance(response.content, str):
+                raise ValueError("分析计划不是 JSON 文本")
+            mode = AnalysisPlan.model_validate_json(response.content).mode
+        except (ModelRateLimitError, ValidationError, ValueError):
+            pass
+    first, last = values[0], values[-1]
+    delta = last.total - first.total
+    direction = "下降" if delta < 0 else "上升" if delta > 0 else "持平"
+    observations = "、".join(
+        f"{item.start.isoformat()} {_display(item.total, item.unit)}" for item in values
     )
+    parts = [
+        f"教学合成数据（百亿补贴）：{metric_name} 为 {observations}；"
+        f"首末{direction} {_display(abs(delta), first.unit)}，"
+        f"变化率 {_percent(Decimal(delta), Decimal(first.total))}。"
+    ]
+    if mode == "high_low":
+        high = max(values, key=lambda item: item.total)
+        low = min(values, key=lambda item: item.total)
+        parts.append(f"最高为 {high.start} 的 {_display(high.total, high.unit)}；"
+                     f"最低为 {low.start} 的 {_display(low.total, low.unit)}。")
+    if mode == "largest_daily_drop":
+        changes = [(a, b, a.total - b.total) for a, b in zip(values, values[1:])]
+        a, b, drop = max(changes, key=lambda item: item[2])
+        parts.append(
+            f"最大相邻日下降发生在 {a.start}→{b.start}，下降 {_display(drop, a.unit)}。"
+            if drop > 0 else "指定日期间没有相邻日下降。"
+        )
+    if mode == "overall_change":
+        funnel = _funnel(evidence)
+        if funnel:
+            parts.append(funnel)
+        if evidence.request.group_by:
+            parts.append(_group_contribution(first, last))
+    if not any("不能" in part or "不等于" in part for part in parts):
+        parts.append("数值变化本身不能证明经营原因。")
+    return " ".join(parts)

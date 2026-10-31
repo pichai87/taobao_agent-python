@@ -62,8 +62,8 @@ class MetricCatalogTest(unittest.TestCase):
                             [
                                 {
                                     "name": "GMV",
-                                    "table": "demo_orders",
-                                    "field": "order_amount_fen",
+                                    "table": "commerce_daily",
+                                    "field": "pay_amount_cents",
                                     "source": "test fixture",
                                     "calculation": calculation,
                                 }

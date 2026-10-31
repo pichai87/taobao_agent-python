@@ -18,7 +18,7 @@ class EqualsCondition(BaseModel):
 
 
 class MetricCalculation(BaseModel):
-    """The small calculation contract supported by the current demo data."""
+    """The approved sum rule for the current commerce data."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

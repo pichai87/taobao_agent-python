@@ -1,4 +1,4 @@
-"""A small, reproducible business evaluation for the current UCI workflow."""
+"""A small, reproducible business evaluation for the one commerce workflow."""
 
 import argparse
 import json
@@ -9,11 +9,11 @@ from time import perf_counter
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH
 from taobao_agent.intent_agent import DateRange, IntentType
+from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.model import ToolCallingModel, create_qwen_model
 from taobao_agent.supervisor import ExpertName
-from taobao_agent.uci_analytics import source_catalog
-from taobao_agent.uci_online_retail import UCIQueryError
 from taobao_agent.workflow import WorkflowResult, run_workflow
 
 
@@ -126,14 +126,14 @@ def evaluate_dataset(
 ) -> EvaluationReport:
     """Run each question independently and keep failures visible in the report."""
 
-    catalog = source_catalog(database_path)
+    catalog = load_metric_catalog(CATALOG_PATH)
     outcomes: list[CaseOutcome] = []
     for case in dataset.cases:
         started = perf_counter()
         try:
             result = run_workflow(
                 case.question, model, dataset.reference_date, catalog,
-                uci_db_path=database_path, query_model=model, analysis_model=model,
+                database_path=database_path, query_model=model, analysis_model=model,
             )
             elapsed_ms = round((perf_counter() - started) * 1000)
             outcomes.append(score_case(case, result, elapsed_ms, diagnostic=diagnostic))
@@ -157,15 +157,15 @@ def evaluate_dataset(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="用固定业务题集评测当前 UCI Agent")
+    parser = argparse.ArgumentParser(description="用固定业务题集评测合成电商 Agent")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET_PATH)
     parser.add_argument("--database", type=Path, default=None)
     parser.add_argument("--case", action="append", dest="case_ids", help="仅运行指定题目，可重复")
     parser.add_argument("--diagnostic", action="store_true", help="在报告中包含公开题目的实际识别字段和答案")
     args = parser.parse_args()
-    database_path = args.database or Path(os.environ.get("TAOBAO_UCI_DB_PATH", ""))
+    database_path = args.database or Path(os.environ.get("TAOBAO_DB_PATH", str(DEFAULT_DB_PATH)))
     if not database_path.is_file():
-        parser.exit(2, "请用 --database 或 TAOBAO_UCI_DB_PATH 指定已导入的 UCI SQLite 文件。\n")
+        parser.exit(2, "请先运行 taobao-seed-commerce，或用 --database 指定合成电商 SQLite。\n")
     try:
         dataset = load_dataset(args.dataset)
         if args.case_ids:
@@ -174,12 +174,9 @@ def main() -> None:
                 raise ValueError("指定的题目不存在或重复")
             dataset = GoldenDataset(reference_date=dataset.reference_date, cases=selected)
         model = create_qwen_model()
-    except (OSError, ValueError, RuntimeError, UCIQueryError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(2, f"评测准备失败：{exc}\n")
-    try:
-        report = evaluate_dataset(dataset, database_path, model, diagnostic=args.diagnostic)
-    except UCIQueryError as exc:
-        parser.exit(2, f"评测数据源无效：{exc}\n")
+    report = evaluate_dataset(dataset, database_path, model, diagnostic=args.diagnostic)
     print(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
     if report.passed != report.total:
         raise SystemExit(1)
