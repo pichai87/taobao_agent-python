@@ -1,0 +1,38 @@
+[
+  {
+    "name": "交易明细金额",
+    "table": "retail_lines",
+    "field": "line_amount_pence",
+    "source": "UCI Online Retail；只计正向且数量、单价均为正的明细；非支付口径",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "invoice_date",
+      "condition": {"field": "record_type", "value": "positive"},
+      "unit": "pence"
+    }
+  },
+  {
+    "name": "正向商品件数",
+    "table": "retail_lines",
+    "field": "quantity",
+    "source": "UCI Online Retail；只计正向且数量、单价均为正的明细；不是已支付商品件数",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "invoice_date",
+      "condition": {"field": "record_type", "value": "positive"},
+      "unit": "件"
+    }
+  },
+  {
+    "name": "正向交易行数",
+    "table": "retail_lines",
+    "field": "line_count",
+    "source": "UCI Online Retail；只计正向且数量、单价均为正的明细；一行不等于一笔订单",
+    "calculation": {
+      "aggregation": "sum",
+      "date_field": "invoice_date",
+      "condition": {"field": "record_type", "value": "positive"},
+      "unit": "行"
+    }
+  }
+]

@@ -123,6 +123,25 @@ class IntentAgentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "duplicates"):
             run_intent_once("比较三天交易明细金额", FakeModel(payload), date(2026, 6, 15))
 
+    def test_range_accepts_matching_dates_but_rejects_conflicting_dates(self) -> None:
+        payload = valid_payload()
+        payload["prev"] = "2010-12-01"
+        payload["curr"] = "2010-12-03"
+        payload["date_range"] = {"start": "2010-12-01", "end": "2010-12-03"}
+        payload["dates"] = ["2010-12-01", "2010-12-02", "2010-12-03"]
+
+        result = run_intent_once("查询 2010-12-01 至 03", FakeModel(payload), date(2026, 6, 15))
+        self.assertEqual(result.date_range.start, date(2010, 12, 1))
+        self.assertEqual(result.date_range.end, date(2010, 12, 3))
+
+        payload["dates"] = ["2010-12-01", "2010-12-04"]
+        with self.assertRaisesRegex(ValidationError, "agree with date_range"):
+            run_intent_once("查询 2010-12-01 至 03", FakeModel(payload), date(2026, 6, 15))
+
+        payload["dates"] = ["2010-12-03", "2010-12-01"]
+        with self.assertRaisesRegex(ValidationError, "agree with date_range"):
+            run_intent_once("查询 2010-12-01 至 03", FakeModel(payload), date(2026, 6, 15))
+
     def test_rate_limit_uses_rule_for_observed_attribution_question(self) -> None:
         model = RateLimitedModel()
 

@@ -7,13 +7,13 @@ from datetime import date
 from pathlib import Path
 from time import perf_counter
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from taobao_agent.intent_agent import IntentType
-from taobao_agent.metric_catalog import load_metric_catalog
+from taobao_agent.intent_agent import DateRange, IntentType
 from taobao_agent.model import ToolCallingModel, create_qwen_model
 from taobao_agent.supervisor import ExpertName
-from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
+from taobao_agent.uci_analytics import source_catalog
+from taobao_agent.uci_online_retail import UCIQueryError
 from taobao_agent.workflow import WorkflowResult, run_workflow
 
 
@@ -29,6 +29,8 @@ class GoldenCase(BaseModel):
     expected_expert: ExpertName
     expected_metric: str | None
     expected_dates: tuple[date, ...]
+    expected_metrics: tuple[str, ...] | None = None
+    expected_range: DateRange | None = None
     expected_dimensions: tuple[str, ...] = ()
     required_answer: tuple[str, ...] = ()
     forbidden_answer: tuple[str, ...] = ()
@@ -62,6 +64,8 @@ class CaseOutcome(BaseModel):
     checks: dict[str, bool]
     elapsed_ms: int
     error_type: str | None = None
+    error_fields: tuple[str, ...] = ()
+    observed: dict[str, object] | None = None
 
 
 class EvaluationReport(BaseModel):
@@ -74,7 +78,9 @@ def load_dataset(path: Path = DEFAULT_DATASET_PATH) -> GoldenDataset:
     return GoldenDataset.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def score_case(case: GoldenCase, result: WorkflowResult, elapsed_ms: int = 0) -> CaseOutcome:
+def score_case(
+    case: GoldenCase, result: WorkflowResult, elapsed_ms: int = 0, *, diagnostic: bool = False,
+) -> CaseOutcome:
     """Score exact, observable behavior; do not use a model as a judge."""
 
     answer = result.answer or ""
@@ -83,23 +89,44 @@ def score_case(case: GoldenCase, result: WorkflowResult, elapsed_ms: int = 0) ->
         "intents": actual_intents == set(case.expected_intents),
         "expert": result.next_expert == case.expected_expert,
         "metric": result.intent.metric_name == case.expected_metric,
-        "dates": result.intent.requested_dates() == case.expected_dates,
+        "dates": (
+            result.intent.date_range == case.expected_range
+            if case.expected_range is not None
+            else result.intent.requested_dates() == case.expected_dates
+        ),
+        "metrics": (
+            tuple(result.intent.metric_names) == case.expected_metrics
+            if case.expected_metrics is not None else True
+        ),
         "dimensions": tuple(result.intent.dimensions) == case.expected_dimensions,
         "required_answer": all(phrase in answer for phrase in case.required_answer),
         "forbidden_answer": all(phrase not in answer for phrase in case.forbidden_answer),
     }
+    observed = None
+    if diagnostic:
+        observed = {
+            "intents": sorted(actual_intents),
+            "expert": result.next_expert,
+            "metric": result.intent.metric_name,
+            "dates": [day.isoformat() for day in result.intent.requested_dates()],
+            "metric_names": result.intent.metric_names,
+            "date_range": result.intent.date_range.model_dump(mode="json") if result.intent.date_range else None,
+            "dimensions": result.intent.dimensions,
+            "answer": answer[:1000],
+        }
     return CaseOutcome(
         case_id=case.id, passed=all(checks.values()), checks=checks,
-        elapsed_ms=elapsed_ms,
+        elapsed_ms=elapsed_ms, observed=observed,
     )
 
 
 def evaluate_dataset(
     dataset: GoldenDataset, database_path: Path, model: ToolCallingModel,
+    *, diagnostic: bool = False,
 ) -> EvaluationReport:
     """Run each question independently and keep failures visible in the report."""
 
-    catalog = load_metric_catalog(UCI_CATALOG_PATH)
+    catalog = source_catalog(database_path)
     outcomes: list[CaseOutcome] = []
     for case in dataset.cases:
         started = perf_counter()
@@ -109,12 +136,19 @@ def evaluate_dataset(
                 uci_db_path=database_path, query_model=model, analysis_model=model,
             )
             elapsed_ms = round((perf_counter() - started) * 1000)
-            outcomes.append(score_case(case, result, elapsed_ms))
+            outcomes.append(score_case(case, result, elapsed_ms, diagnostic=diagnostic))
         except Exception as exc:
+            error_fields: tuple[str, ...] = ()
+            if diagnostic and isinstance(exc, ValidationError):
+                error_fields = tuple(
+                    f"{'.'.join(map(str, item['loc']))}: {item['msg']}"[:200]
+                    for item in exc.errors(include_input=False, include_url=False)
+                )
             outcomes.append(CaseOutcome(
                 case_id=case.id, passed=False, checks={},
                 elapsed_ms=round((perf_counter() - started) * 1000),
                 error_type=type(exc).__name__,
+                error_fields=error_fields,
             ))
     return EvaluationReport(
         total=len(outcomes), passed=sum(outcome.passed for outcome in outcomes),
@@ -126,16 +160,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="用固定业务题集评测当前 UCI Agent")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET_PATH)
     parser.add_argument("--database", type=Path, default=None)
+    parser.add_argument("--case", action="append", dest="case_ids", help="仅运行指定题目，可重复")
+    parser.add_argument("--diagnostic", action="store_true", help="在报告中包含公开题目的实际识别字段和答案")
     args = parser.parse_args()
     database_path = args.database or Path(os.environ.get("TAOBAO_UCI_DB_PATH", ""))
     if not database_path.is_file():
         parser.exit(2, "请用 --database 或 TAOBAO_UCI_DB_PATH 指定已导入的 UCI SQLite 文件。\n")
     try:
         dataset = load_dataset(args.dataset)
+        if args.case_ids:
+            selected = tuple(case for case in dataset.cases if case.id in args.case_ids)
+            if len(selected) != len(set(args.case_ids)):
+                raise ValueError("指定的题目不存在或重复")
+            dataset = GoldenDataset(reference_date=dataset.reference_date, cases=selected)
         model = create_qwen_model()
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, UCIQueryError) as exc:
         parser.exit(2, f"评测准备失败：{exc}\n")
-    report = evaluate_dataset(dataset, database_path, model)
+    try:
+        report = evaluate_dataset(dataset, database_path, model, diagnostic=args.diagnostic)
+    except UCIQueryError as exc:
+        parser.exit(2, f"评测数据源无效：{exc}\n")
     print(json.dumps(report.model_dump(mode="json"), ensure_ascii=False))
     if report.passed != report.total:
         raise SystemExit(1)

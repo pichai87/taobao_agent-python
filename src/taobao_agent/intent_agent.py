@@ -16,6 +16,18 @@ from taobao_agent.model import ChatModel, create_qwen_model
 IntentType = Literal["data_query", "attribution", "table_meta", "other"]
 
 
+class DateRange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    start: date
+    end: date
+
+    @model_validator(mode="after")
+    def check_order(self) -> "DateRange":
+        if self.start > self.end:
+            raise ValueError("date range start must not exceed end")
+        return self
+
+
 class IntentResult(BaseModel):
     """Small, validated subset of the article's intent parameter package."""
 
@@ -30,6 +42,8 @@ class IntentResult(BaseModel):
     curr: date | None
     prev: date | None
     dates: list[date] = Field(default_factory=list)
+    metric_names: list[str] = Field(default_factory=list)
+    date_range: DateRange | None = None
     scope: str | None
     dimensions: list[str]
     source: Literal["llm", "rule"] = "llm"
@@ -71,6 +85,21 @@ class IntentResult(BaseModel):
             raise ValueError("primary intent cannot also be secondary")
         if len(set(self.dates)) != len(self.dates):
             raise ValueError("dates contains duplicates")
+        if len(set(self.metric_names)) != len(self.metric_names):
+            raise ValueError("metric_names contains duplicates")
+        if self.metric_names and self.metric_name != self.metric_names[0]:
+            raise ValueError("metric_name must equal the first metric_names item")
+        if self.date_range is not None:
+            if self.dates and (
+                self.dates[0] != self.date_range.start
+                or self.dates[-1] != self.date_range.end
+                or self.dates != sorted(self.dates)
+            ):
+                raise ValueError("dates must agree with date_range endpoints and order")
+            if self.prev is not None and self.prev != self.date_range.start:
+                raise ValueError("prev must match date_range start")
+            if self.curr is not None and self.curr != self.date_range.end:
+                raise ValueError("curr must match date_range end")
         if self.dates:
             if self.prev is not None and self.dates[0] != self.prev:
                 raise ValueError("prev must match the first requested date")
@@ -96,14 +125,25 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date) -> In
     system_prompt = (
         "你是电商数据分析助手的意图识别入口。只输出一个 JSON 对象，不回答问题，不编造数据。"
         "字段必须恰好为 intent_type, secondary_intents, confidence, metric_name, "
-        "metric_field, time_label, curr, prev, dates, scope, dimensions。"
+        "metric_field, time_label, curr, prev, dates, metric_names, date_range, scope, dimensions。"
         "intent_type 和 secondary_intents 只允许 data_query（取数）、attribution（波动归因）、"
         "table_meta（表结构）、other（其他）。主意图放 intent_type；只有明确的第二任务才放入"
         "secondary_intents，否则给空数组。confidence 为 0 到 1 的数字。"
+        "需要比较数值、找最高最低、找最大下降或分析变化时，主意图为 attribution；"
+        "即使用户没有说‘为什么’，也不能归为纯 data_query。"
+        "询问指标使用哪个表、哪个字段或怎样计算时，意图为 table_meta。"
+        "如果同一个问题既问计算口径又问具体日期的数值，必须同时输出 table_meta 和"
+        "data_query：其中一个作为主意图，另一个放在 secondary_intents；不能漏掉任一任务。"
         "metric_name 写用户提到的业务指标名称；没有则为 null。当前没有语义模型，"
+        "即使问题是表字段或计算口径，也要从用户原句提取指标名，不要因为它是元数据问题就填 null。"
         "metric_field 必须为 null，不能猜测数据库字段。"
         "time_label 保留用户的时间表述；curr 是主查询或最后一个日期，prev 是比较基准日期；"
         "dates 按比较基准到最终日期列出用户明确要求的所有日期，单日或双日也可以列出；"
+        "若用户明确提到多个指标，metric_names 按原顺序列出全部指标，metric_name 等于首项；"
+        "单指标时 metric_names 可以为空数组。若用户问连续日期范围，date_range 写"
+        "{\"start\":\"YYYY-MM-DD\",\"end\":\"YYYY-MM-DD\"}，否则为 null；"
+        "日期范围时优先让 dates 为空数组，curr/prev 可分别是范围末日/首日；"
+        "如果也填写 dates，必须从范围首日到末日按日期升序列出。"
         "若 dates 非空，首项须与非空 prev 一致，末项须与非空 curr 一致。"
         "日期用 YYYY-MM-DD 字符串，没有明确或可解析的日期就填 null，dates 没有则为空数组。"
         "scope 只写用户明确指定的范围，否则为 null。dimensions 是用户明确要求的分组维度数组，"

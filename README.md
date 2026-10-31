@@ -2,7 +2,7 @@
 
 基于《淘宝百亿补贴数据分析助手 Agent 实战》逐步实现的 Python + LangGraph 学习项目。
 
-当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择专家 → Query 查指标与取数 → 按需交给 Analysis**。Query 可处理同一指标的单日或多个指定日期；Analysis 接收整组查询证据，由模型选择受限分析任务、Python 计算数值。当前数据源仅批准 UCI 的“交易明细金额”，总额变化还不能证明下降原因。第 18 课的“从用户问题里匹配两笔金额并跳过 Query”已移除。阶段 2 的单节点练习位于[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前运行。
+当前运行代码只有一张 LangGraph 图：**Intent 识别问题 → Supervisor 选择专家 → Query 查指标与取数 → 按需交给 Analysis**。原 UCI 数据库继续支持单指标逐日 Tool Calling；新建的增强版数据库支持交易明细金额、正向商品件数、正向交易行数，以及日期范围、国家/商品编码分组。Analysis 能按两个日期拆解分组数值贡献，但不能证明经营变化的原因。第 18 课的“从用户问题里匹配两笔金额并跳过 Query”已移除。阶段 2 的单节点练习位于[历史样例](docs/learning/archive/02_minimal_agent.py)，不参与当前运行。
 
 ## 环境与验证
 
@@ -11,7 +11,35 @@ uv sync
 uv run python -m unittest discover -s tests -v
 ```
 
-第 24 课新增七题业务评测入口。准备好本地 UCI SQLite 和 Plus Key 后，在同一终端运行 `TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-eval`。它逐题报告意图、路由和答案事实检查；失败退出码为 1，会产生多次模型请求。当前环境尚未运行在线七题评测。详见[第 24 课](docs/learning/lessons/24-业务Golden评测入口.md)。
+第 24 课新增七题业务评测入口。准备好本地 UCI SQLite 和 Plus Key 后，在同一终端运行 `TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-eval`。它逐题报告意图、路由和答案事实检查；失败退出码为 1，会产生多次模型请求。首次在线评测为 **4/7**，本轮已按失败项改进 Intent 提示，复测结果见[第 25 课](docs/learning/lessons/25-可信分组查询与评测纠错.md)。
+
+## 第 25 课：增强版公开数据与分组分析
+
+本机已从同一份 UCI Excel 新建 `data/uci_online_retail/online_retail_enriched.sqlite`；原 `online_retail.sqlite` 保留且仍可查询。新克隆仓库时，可在准备好 Excel 后执行：
+
+```bash
+uv run taobao-import-uci-enriched 'data/uci_online_retail/Online Retail.xlsx' 'data/uci_online_retail/online_retail_enriched.sqlite'
+```
+
+**目的**：从原始交易明细单独导入可按国家、商品编码核对的副本，并新增件数和行数。**预期**：输出正向 530104 行、取消 9288 行、其他 2517 行；若目标文件已有内容则拒绝覆盖。它只准备本地数据，不调用 LLM，也不证明问题识别正确。无需安装数据库服务或 Navicat。
+
+在已设置 Plus Key 的终端，可查询日期范围与多指标：
+
+```bash
+TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail_enriched.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-01 至 2010-12-02 按国家看交易明细金额、正向商品件数和正向交易行数'
+```
+
+**目的**：验证 Intent 识别多个指标与时间范围，Query 通过批准的 SQL 模板读取分组结果。**预期**：这两天正向明细金额合计 106709.17 英镑、商品件数 58248 件、交易行数 5135 行，各指标的国家分组合计与总值一致。真实模型是否稳定识别该问法，以本轮在线运行记录为准；本地计算和 SQL 校验已有测试。
+
+分组贡献分析示例：
+
+```bash
+TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail_enriched.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-agent '2010-12-02 交易明细金额比 2010-12-01 为什么下降？按国家拆解'
+```
+
+**目的**：让 Query 分别查询两天的国家分组，Analysis 计算各组增减对总体净变化的贡献。**预期**：总体下降 11212.41 英镑，回答区分“数值贡献”和“原因”。它不能证明国家、商品或营销因素造成了下降，也不等于原文的完整归因诊断。
+
+增强版的三题业务评测可运行 `TAOBAO_UCI_DB_PATH=data/uci_online_retail/online_retail_enriched.sqlite DASHSCOPE_API_KEY="$DASHSCOPE_PLUS_API_KEY" DASHSCOPE_MODEL=qwen-plus uv run taobao-eval --dataset scripts/eval/datasets/enriched.json`。**目的**：分别检查多指标范围分组、国家贡献和商品编码分组的真实模型行为；**预期**：报告包含 `total=3`，通过数以实际输出为准。旧七题仍使用原 `online_retail.sqlite`，其中“国家维度不支持”是旧库的正确预期，不能拿增强版库跑旧题集。
 
 ## 设置模型 Key
 

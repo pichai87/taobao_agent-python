@@ -24,6 +24,7 @@ from taobao_agent.metric_search import MetricCalculation, MetricDefinition, NonE
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.model import ToolCallingModel
 from taobao_agent.uci_online_retail import UCIDateOutOfRange, UCIQueryError, inspect_uci_metric
+from taobao_agent.uci_analytics import inspect_enriched_metric, is_enriched_catalog
 
 
 class MetricQueryPlan(BaseModel):
@@ -319,7 +320,10 @@ def answer_table_meta(
             f"来源为 {metric.source}。当前未连接数据源，表字段和口径尚未核对。"
         )
     try:
-        profile = inspect_uci_metric(metric, uci_db_path)
+        profile = (
+            inspect_enriched_metric(metric, uci_db_path)
+            if is_enriched_catalog(catalog) else inspect_uci_metric(metric, uci_db_path)
+        )
     except UCIQueryError:
         return "UCI 公开数据的指标或表字段未通过核对，当前无法说明表结构。"
     calculation = metric.calculation
@@ -327,10 +331,14 @@ def answer_table_meta(
         return "指标缺少已核准的计算规则。"
     return (
         f"UCI Online Retail 公开数据：{metric.name} 对应表 {metric.table}，"
-        f"金额字段 {metric.field}；按 {calculation.date_field} 汇总，"
+        f"指标字段 {metric.field}；按 {calculation.date_field} 汇总，"
         f"只计入 {calculation.condition.field}={calculation.condition.value} 的行，"
         f"计算方式 {calculation.aggregation}，单位 {calculation.unit}。"
         f"数据库已核对字段：{', '.join(profile.approved_columns)}；"
         f"数据日期 {profile.first_date} 至 {profile.last_date}。"
-        "这不是已支付 GMV；当前没有商品、行业或访客字段。"
+        + (
+            "这不是已支付 GMV；有国家和商品编码字段，没有行业、访客或支付字段。"
+            if is_enriched_catalog(catalog)
+            else "这不是已支付 GMV；当前没有商品、行业或访客字段。"
+        )
     )

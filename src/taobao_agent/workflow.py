@@ -12,6 +12,9 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from taobao_agent.analysis_agent import MetricSeriesEvidence, answer_analysis_question
+from taobao_agent.aggregate_agent import (
+    AggregateEvidence, answer_aggregate_query, answer_group_analysis, fetch_aggregate_evidence,
+)
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
@@ -19,7 +22,8 @@ from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
 from taobao_agent.query_agent import answer_query, answer_table_meta, fetch_metric_series
 from taobao_agent.supervisor import ExpertName, TaskName, plan_tasks, select_expert
-from taobao_agent.uci_online_retail import UCI_CATALOG_PATH
+from taobao_agent.uci_analytics import is_enriched_catalog, source_catalog
+from taobao_agent.uci_online_retail import UCIQueryError
 
 
 class WorkflowState(TypedDict):
@@ -28,6 +32,7 @@ class WorkflowState(TypedDict):
     next_expert: NotRequired[ExpertName]
     task_plan: NotRequired[list[TaskName]]
     query_evidence: NotRequired[dict[str, object] | None]
+    aggregate_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
 
@@ -67,6 +72,17 @@ def build_workflow(
 
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
+        if uci_db_path is not None and is_enriched_catalog(metric_catalog):
+            if state["task_plan"] == ["table_meta"]:
+                return {"answer": answer_table_meta(intent, metric_catalog, uci_db_path)}
+            if state["task_plan"] == ["table_meta", "data_query"]:
+                return {"answer": "请将多指标或分组查询与指标口径问题分别提问。"}
+            result = fetch_aggregate_evidence(intent, state["question"], metric_catalog, uci_db_path)
+            if isinstance(result, str):
+                return {"answer": result, "aggregate_evidence": None}
+            if state["next_expert"] == "analysis":
+                return {"aggregate_evidence": result.model_dump(mode="json")}
+            return {"answer": answer_aggregate_query(result)}
         if state["task_plan"] == ["table_meta", "data_query"]:
             single = intent.model_copy(update={"secondary_intents": []})
             metadata = answer_table_meta(single, metric_catalog, uci_db_path)
@@ -93,6 +109,9 @@ def build_workflow(
         }
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
+        if state.get("aggregate_evidence") is not None:
+            evidence = AggregateEvidence.model_validate(state["aggregate_evidence"])
+            return {"answer": answer_group_analysis(evidence)}
         evidence = MetricSeriesEvidence.model_validate(state["query_evidence"])
         return {"answer": answer_analysis_question(state["question"], evidence, analysis_model)}
 
@@ -104,7 +123,9 @@ def build_workflow(
         return state["next_expert"]
 
     def route_after_query(state: WorkflowState) -> str:
-        if state["next_expert"] == "analysis" and state.get("query_evidence") is not None:
+        if state["next_expert"] == "analysis" and (
+            state.get("query_evidence") is not None or state.get("aggregate_evidence") is not None
+        ):
             return "analysis"
         return "done"
 
@@ -170,11 +191,11 @@ def main() -> None:
         if uci_db_path is not None and not uci_db_path.is_file():
             raise ValueError(f"UCI 数据库文件不存在：{uci_db_path}")
         if uci_db_path is not None:
-            metric_catalog = load_metric_catalog(UCI_CATALOG_PATH)
+            metric_catalog = source_catalog(uci_db_path)
         else:
             metric_catalog = load_metric_catalog(Path(catalog_path)) if catalog_path else ()
         model = create_qwen_model()
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, UCIQueryError) as exc:
         parser.exit(2, f"{exc}\n")
 
     try:

@@ -30,6 +30,11 @@ class EvaluationTest(unittest.TestCase):
         self.assertEqual(len(dataset.cases), 7)
         self.assertEqual(dataset.reference_date, date(2026, 10, 30))
         self.assertIn("metadata_and_amount", {case.id for case in dataset.cases})
+        enriched = load_dataset(Path("scripts/eval/datasets/enriched.json"))
+        self.assertEqual(len(enriched.cases), 3)
+        self.assertEqual(enriched.cases[0].expected_metrics, (
+            "交易明细金额", "正向商品件数", "正向交易行数",
+        ))
 
     def test_score_separates_intent_route_dates_and_answer(self) -> None:
         case = load_dataset().cases[0]
@@ -39,13 +44,37 @@ class EvaluationTest(unittest.TestCase):
         self.assertFalse(bad.passed)
         self.assertFalse(bad.checks["required_answer"])
         self.assertTrue(bad.checks["intents"])
+        diagnostic = score_case(case, result("没有数据"), diagnostic=True)
+        self.assertEqual(diagnostic.observed["metric"], "交易明细金额")
+        self.assertEqual(diagnostic.observed["answer"], "没有数据")
+
+    def test_enriched_score_checks_all_metrics_and_range(self) -> None:
+        case = load_dataset(Path("scripts/eval/datasets/enriched.json")).cases[0]
+        observed = WorkflowResult(
+            intent=IntentResult(
+                intent_type="data_query", secondary_intents=[], confidence=0.9,
+                metric_name="交易明细金额", metric_field=None, time_label=None,
+                curr="2010-12-02", prev="2010-12-01", dates=[],
+                metric_names=["交易明细金额", "正向商品件数", "正向交易行数"],
+                date_range={"start": "2010-12-01", "end": "2010-12-02"},
+                scope=None, dimensions=["国家"],
+            ),
+            next_expert="query",
+            answer="106709.17 英镑；58248 件；5135 行；按国家分组",
+        )
+        self.assertTrue(score_case(case, observed).passed)
+        changed = observed.model_copy(update={
+            "intent": observed.intent.model_copy(update={"metric_names": ["交易明细金额"]}),
+        })
+        self.assertFalse(score_case(case, changed).checks["metrics"])
 
     def test_runner_keeps_case_errors_visible_and_continues(self) -> None:
         case = load_dataset().cases[0]
         dataset = GoldenDataset(reference_date="2026-10-30", cases=(
             case, case.model_copy(update={"id": "second"}),
         ))
-        with patch("taobao_agent.evaluation.run_workflow", side_effect=[result(), RuntimeError("secret")]) as workflow:
+        with patch("taobao_agent.evaluation.source_catalog", return_value=()), \
+             patch("taobao_agent.evaluation.run_workflow", side_effect=[result(), RuntimeError("secret")]) as workflow:
             report = evaluate_dataset(dataset, Path("unused.sqlite"), model=object())
         self.assertEqual(workflow.call_count, 2)
         self.assertEqual((report.passed, report.total), (1, 2))
