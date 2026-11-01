@@ -1,0 +1,39 @@
+{
+  "model": {
+    "name": "百亿补贴日报",
+    "table": "commerce_daily",
+    "source": "synthetic-commerce-v1",
+    "columns": {
+      "biz_date": "业务日期",
+      "industry": "行业",
+      "activity_type": "活动类型",
+      "visitor_uv": "访客数",
+      "order_count": "订单数",
+      "pay_amount_cents": "支付金额（分）"
+    },
+    "dimensions": {"行业": "industry"}
+  },
+  "rules": [
+    {
+      "id": "bybt_scope",
+      "metric_names": ["GMV", "访客数", "订单数"],
+      "condition_field": "activity_type",
+      "condition_value": "百亿补贴",
+      "description": "三项指标均只统计百亿补贴活动；不混入普通活动。"
+    }
+  ],
+  "snippets": [
+    {
+      "id": "total_by_period",
+      "group_by": null,
+      "description": "单个指标在批准日期范围内求和。",
+      "template": "SELECT COALESCE(SUM(\"{metric_field}\"), 0) AS value FROM \"{table}\" WHERE \"{date_field}\" >= ? AND \"{date_field}\" <= ? AND \"{condition_field}\" = ?"
+    },
+    {
+      "id": "total_by_industry",
+      "group_by": "行业",
+      "description": "在批准日期范围内按行业分组求和。",
+      "template": "SELECT \"{group_field}\" AS group_value, COALESCE(SUM(\"{metric_field}\"), 0) AS value FROM \"{table}\" WHERE \"{date_field}\" >= ? AND \"{date_field}\" <= ? AND \"{condition_field}\" = ? GROUP BY \"{group_field}\" ORDER BY group_value"
+    }
+  ]
+}

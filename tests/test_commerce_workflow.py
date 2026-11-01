@@ -14,6 +14,7 @@ from taobao_agent.commerce_data import (
     CATALOG_PATH, CommerceDataError, query_metric, seed_commerce_db,
 )
 from taobao_agent.evaluation import load_dataset, score_case
+from taobao_agent.knowledge import KNOWLEDGE_PATH, load_knowledge
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.workflow import build_workflow, run_workflow
@@ -26,6 +27,7 @@ class FakeModel:
         self.tool_names: list[str] = []
         self.intent_calls = 0
         self.analysis_calls = 0
+        self.proposed_tools: list[str] = []
 
     def bind_tools(self, tools: list[object], *, tool_choice: str = "auto") -> "FakeModel":
         self.tool_names = [item.name for item in tools]
@@ -40,15 +42,33 @@ class FakeModel:
         if "分析专家" in system.content:
             self.analysis_calls += 1
             return AIMessage(content=json.dumps({"mode": self.mode}))
+        if "任务规划专家" in system.content:
+            names = {self.intent["intent_type"], *self.intent["secondary_intents"]}
+            tasks = []
+            if "table_meta" in names:
+                tasks.append("table_meta")
+            if "data_query" in names or "attribution" in names:
+                tasks.append("data_query")
+            if "attribution" in names:
+                tasks.append("analysis")
+            return AIMessage(content=json.dumps({"tasks": tasks}))
         if "取数专家" in system.content:
             request = json.loads(messages[1].content.split("已批准请求：", 1)[1])
-            index = sum(isinstance(message, ToolMessage) for message in messages)
-            name = self.tool_names[index]
+            called = [message.tool_calls[0]["name"] for message in messages
+                      if isinstance(message, AIMessage) and message.tool_calls]
+            name = next(item for item in (
+                "search_metrics", "snippet_search", "rule_search",
+                *(("cap_search",) if request["group_by"] else ()),
+                "build_sql", "execute_query",
+            ) if item not in called)
             args = {"metric_names": request["metric_names"]}
+            if name == "snippet_search":
+                args = {"group_by": request["group_by"]}
             if name in {"build_sql", "execute_query"}:
                 args.update(periods=request["periods"], group_by=request["group_by"])
+            self.proposed_tools.append(name)
             return AIMessage(content="", tool_calls=[{
-                "name": name, "args": args, "id": f"tool-{index}",
+                "name": name, "args": args, "id": f"tool-{len(called)}",
             }])
         raise AssertionError("Unexpected model call")
 
@@ -98,7 +118,8 @@ class CommerceWorkflowTest(unittest.TestCase):
         result = self.run_case("2026-10-22 百亿补贴 GMV 多少？", single)
         self.assertIn("20600.00 元", result.answer)
         self.assertEqual(single.tool_names,
-                         ["search_metrics", "rule_search", "build_sql", "execute_query"])
+                         ["search_metrics", "rule_search", "cap_search", "snippet_search",
+                          "build_sql", "execute_query"])
         self.assertEqual(single.intent_calls, 1)
         multi = FakeModel(intent_payload(
             "data_query", metric_names=["GMV", "访客数", "订单数"],
@@ -109,6 +130,52 @@ class CommerceWorkflowTest(unittest.TestCase):
         for expected in ("44600.00 元", "4900 人", "446 单", "家电", "服装", "食品"):
             self.assertIn(expected, grouped.answer)
         self.assertEqual(multi.tool_names, single.tool_names)
+        self.assertEqual(single.proposed_tools,
+                         ["search_metrics", "snippet_search", "rule_search",
+                          "build_sql", "execute_query"])
+        self.assertEqual(multi.proposed_tools,
+                         ["search_metrics", "snippet_search", "rule_search",
+                          "cap_search", "build_sql", "execute_query"])
+
+    def test_compound_metadata_query_analysis_keeps_all_three_tasks(self) -> None:
+        for primary, secondary in (
+            ("table_meta", ["data_query", "attribution"]),
+            ("attribution", ["table_meta", "data_query"]),
+        ):
+            with self.subTest(primary=primary):
+                model = FakeModel(intent_payload(
+                    primary, dates=["2026-10-21", "2026-10-22"], secondary=secondary,
+                    dimensions=["行业"],
+                ))
+                updates = list(build_workflow(
+                    model, date(2026, 11, 1), self.catalog, self.database,
+                    query_model=model, analysis_model=model,
+                ).stream({"question": "GMV 口径是什么？比较 2026-10-21 和 2026-10-22 并分析下降"}))
+                self.assertEqual([next(iter(item)) for item in updates],
+                                 ["intent", "supervisor", "query", "analysis"])
+                self.assertEqual(updates[1]["supervisor"]["task_plan"],
+                                 ["table_meta", "data_query", "analysis"])
+                self.assertEqual(updates[1]["supervisor"]["next_expert"], "analysis")
+                answer = updates[-1]["analysis"]["answer"]
+                for phrase in ("指标口径：", "commerce_daily.pay_amount_cents",
+                               "分析结果：", "下降 3400.00 元"):
+                    self.assertIn(phrase, answer)
+
+    def test_semantic_knowledge_rejects_changed_sql_or_metric_rule(self) -> None:
+        original = json.loads(KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+        for change in ("snippet", "rule"):
+            with self.subTest(change=change), TemporaryDirectory() as directory:
+                payload = json.loads(json.dumps(original))
+                if change == "snippet":
+                    payload["snippets"][0]["template"] = payload["snippets"][0]["template"].replace(
+                        "SUM", "MAX"
+                    )
+                else:
+                    payload["rules"][0]["condition_value"] = "普通活动"
+                path = Path(directory) / "knowledge.json"
+                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_knowledge(self.catalog, path)
 
     def test_analysis_consumes_query_evidence_and_reconciles_funnel(self) -> None:
         model = FakeModel(intent_payload(

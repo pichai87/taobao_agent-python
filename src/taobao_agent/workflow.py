@@ -14,12 +14,13 @@ from pydantic import BaseModel
 from taobao_agent.analysis_agent import answer_analysis_question
 from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH
 from taobao_agent.intent_agent import IntentResult, run_intent_once
+from taobao_agent.knowledge import load_knowledge
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
 from taobao_agent.other_agent import answer_other
 from taobao_agent.query_agent import QueryEvidence, answer_query, answer_table_meta, fetch_query_evidence
-from taobao_agent.supervisor import ExpertName, TaskName, plan_tasks, select_expert
+from taobao_agent.supervisor import ExpertName, TaskName, plan_with_model, select_expert
 
 
 class WorkflowState(TypedDict):
@@ -27,6 +28,8 @@ class WorkflowState(TypedDict):
     intent: NotRequired[dict[str, object]]
     next_expert: NotRequired[ExpertName]
     task_plan: NotRequired[list[TaskName]]
+    plan_source: NotRequired[str]
+    metric_metadata: NotRequired[str | None]
     query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
 
@@ -47,6 +50,7 @@ def build_workflow(
     """Compile Intent → Supervisor → Query → optional Analysis once."""
 
     catalog = tuple(metric_catalog) if metric_catalog is not None else load_metric_catalog(CATALOG_PATH)
+    knowledge = load_knowledge(catalog)
 
     def intent_node(state: WorkflowState) -> dict[str, dict[str, object]]:
         result = run_intent_once(state["question"], model, reference_date)
@@ -54,13 +58,14 @@ def build_workflow(
 
     def supervisor_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
-        tasks = plan_tasks(intent)
+        tasks, source = plan_with_model(intent, state["question"], model)
         if tasks is None:
             return {
-                "next_expert": select_expert(intent), "task_plan": [],
+                "next_expert": select_expert(intent), "task_plan": [], "plan_source": source,
                 "answer": "当前尚不支持这组复合任务；请先分别提问。",
             }
-        return {"next_expert": select_expert(intent), "task_plan": list(tasks)}
+        return {"next_expert": select_expert(intent, tasks),
+                "task_plan": list(tasks), "plan_source": source}
 
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": answer_other(state["question"])}
@@ -68,22 +73,23 @@ def build_workflow(
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
         tasks = state["task_plan"]
-        if tasks == ["table_meta"]:
-            return {"answer": answer_table_meta(intent, catalog, database_path)}
-        metadata = None
-        if tasks == ["table_meta", "data_query"]:
-            metadata = answer_table_meta(intent, catalog, database_path)
-            intent = intent.model_copy(update={"secondary_intents": []})
+        metadata = (
+            answer_table_meta(intent, catalog, database_path, knowledge)
+            if "table_meta" in tasks else None
+        )
+        if "data_query" not in tasks:
+            return {"answer": metadata, "metric_metadata": metadata}
         query_model_for_task = query_model or model
         if not hasattr(query_model_for_task, "bind_tools"):
             return {"answer": "取数模型不支持工具调用；没有执行查询。", "query_evidence": None}
         result = fetch_query_evidence(
-            intent, state["question"], catalog, database_path, query_model_for_task
+            intent, state["question"], catalog, database_path, query_model_for_task, knowledge
         )
         if isinstance(result, str):
             return {"answer": result, "query_evidence": None}
         if state["next_expert"] == "analysis":
-            return {"query_evidence": result.model_dump(mode="json")}
+            return {"query_evidence": result.model_dump(mode="json"),
+                    "metric_metadata": metadata}
         answer = answer_query(result)
         if metadata:
             answer = f"指标口径：{metadata}\n查询结果：{answer}"
@@ -91,9 +97,12 @@ def build_workflow(
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
         evidence = QueryEvidence.model_validate(state["query_evidence"])
-        return {"answer": answer_analysis_question(
+        answer = answer_analysis_question(
             state["question"], evidence, analysis_model or model
-        )}
+        )
+        if state.get("metric_metadata"):
+            answer = f"指标口径：{state['metric_metadata']}\n分析结果：{answer}"
+        return {"answer": answer}
 
     def route_after_supervisor(state: WorkflowState) -> str:
         if not state["task_plan"]:
