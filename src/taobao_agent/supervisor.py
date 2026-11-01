@@ -11,12 +11,12 @@ from taobao_agent.model import ChatModel
 
 
 ExpertName = Literal["query", "analysis", "other"]
-TaskName = Literal["table_meta", "data_query", "analysis", "other"]
+TaskName = Literal["table_meta", "lineage", "data_query", "analysis", "other"]
 
 
 class TaskPlanProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    tasks: list[TaskName] = Field(min_length=1, max_length=3)
+    tasks: list[TaskName] = Field(min_length=1, max_length=4)
 
 
 def plan_tasks(intent: IntentResult) -> tuple[TaskName, ...] | None:
@@ -28,11 +28,13 @@ def plan_tasks(intent: IntentResult) -> tuple[TaskName, ...] | None:
     tasks: set[TaskName] = set()
     if "table_meta" in intents:
         tasks.add("table_meta")
+    if "lineage" in intents:
+        tasks.add("lineage")
     if "data_query" in intents or "attribution" in intents:
         tasks.add("data_query")
     if "attribution" in intents:
         tasks.add("analysis")
-    return tuple(name for name in ("table_meta", "data_query", "analysis") if name in tasks)
+    return tuple(name for name in ("table_meta", "lineage", "data_query", "analysis") if name in tasks)
 
 
 def plan_with_model(
@@ -51,7 +53,7 @@ def plan_with_model(
         response = model.invoke([
             SystemMessage(content=(
                 "你是任务规划专家。根据问题和已识别意图输出 JSON：{\"tasks\":[...]}。"
-                "只允许 table_meta、data_query、analysis；分析必须先取数。"
+                "只允许 table_meta、lineage、data_query、analysis；分析必须先取数。"
                 "必须保留用户明确提出的任务；可补充用户明确问到的指标口径任务。"
                 "不要生成 SQL、指标数值或额外意图。"
             )),
@@ -74,7 +76,7 @@ def plan_with_model(
             raise ValueError("计划含未批准任务")
         if "analysis" in proposed and "data_query" not in proposed:
             raise ValueError("分析缺少取数依赖")
-        ordered = tuple(name for name in ("table_meta", "data_query", "analysis") if name in proposed)
+        ordered = tuple(name for name in ("table_meta", "lineage", "data_query", "analysis") if name in proposed)
         return ordered, "llm"
     except (ModelRateLimitError, ValidationError, ValueError):
         return required, "rule"
@@ -86,6 +88,6 @@ def select_expert(intent: IntentResult, tasks: tuple[TaskName, ...] | None = Non
     planned = tasks if tasks is not None else plan_tasks(intent)
     if planned and "analysis" in planned:
         return "analysis"
-    if planned and any(task in planned for task in ("data_query", "table_meta")):
+    if planned and any(task in planned for task in ("data_query", "table_meta", "lineage")):
         return "query"
     return "other"

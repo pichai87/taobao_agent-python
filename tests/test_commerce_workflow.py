@@ -113,6 +113,43 @@ class CommerceWorkflowTest(unittest.TestCase):
             columns = {row[1] for row in connection.execute("PRAGMA table_info(commerce_daily)")}
             self.assertTrue({"visitor_uv", "order_count", "pay_amount_cents", "industry"} <= columns)
 
+    def test_lineage_references_only_approved_source_and_fields(self) -> None:
+        model = FakeModel(intent_payload("lineage"))
+        result = self.run_case("GMV 从哪里来？", model)
+        for phrase in ("commerce_daily.csv", "commerce_daily.pay_amount_cents",
+                       "activity_type=百亿补贴", "上游 ETL"):
+            self.assertIn(phrase, result.answer)
+        self.assertEqual(model.proposed_tools, [])
+
+    def test_session_context_is_isolated_and_survives_new_graph(self) -> None:
+        checkpoint = self.database.parent / "sessions.sqlite"
+        first = FakeModel(intent_payload("data_query", dates=["2026-10-22"]))
+        run_workflow("2026-10-22 GMV 多少？", first, date(2026, 11, 1), self.catalog,
+                     self.database, query_model=first, session_id="alice",
+                     checkpoint_path=checkpoint)
+
+        class FollowUpModel(FakeModel):
+            def __init__(self):
+                super().__init__(intent_payload("data_query", dates=["2026-10-21"]))
+                self.prior_context = ""
+
+            def invoke(self, messages):
+                if "意图识别入口" in messages[0].content:
+                    self.prior_context = messages[1].content
+                return super().invoke(messages)
+
+        same = FollowUpModel()
+        answer = run_workflow("那前一天呢？", same, date(2026, 11, 1), self.catalog,
+                              self.database, query_model=same, session_id="alice",
+                              checkpoint_path=checkpoint)
+        self.assertIn("2026-10-22", same.prior_context)
+        self.assertIn("2026-10-21", answer.answer)
+        other = FollowUpModel()
+        run_workflow("那前一天呢？", other, date(2026, 11, 1), self.catalog,
+                     self.database, query_model=other, session_id="bob",
+                     checkpoint_path=checkpoint)
+        self.assertNotIn("上一轮已确认信息", other.prior_context)
+
     def test_one_query_path_handles_single_day_and_range_group_multi_metric(self) -> None:
         single = FakeModel(intent_payload("data_query", dates=["2026-10-22"]))
         result = self.run_case("2026-10-22 百亿补贴 GMV 多少？", single)

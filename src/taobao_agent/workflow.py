@@ -3,18 +3,21 @@
 import argparse
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 from typing import NotRequired, Sequence, TypedDict
 
 from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 
 from taobao_agent.analysis_agent import answer_analysis_question
 from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH
 from taobao_agent.intent_agent import IntentResult, run_intent_once
 from taobao_agent.knowledge import load_knowledge
+from taobao_agent.lineage import describe_lineage
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
@@ -32,6 +35,7 @@ class WorkflowState(TypedDict):
     metric_metadata: NotRequired[str | None]
     query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
+    session_context: NotRequired[str]
 
 
 class WorkflowResult(BaseModel):
@@ -46,6 +50,7 @@ def build_workflow(
     database_path: Path = DEFAULT_DB_PATH,
     query_model: ToolCallingModel | None = None,
     analysis_model: ChatModel | None = None,
+    checkpointer: object | None = None,
 ):
     """Compile Intent → Supervisor → Query → optional Analysis once."""
 
@@ -53,7 +58,8 @@ def build_workflow(
     knowledge = load_knowledge(catalog)
 
     def intent_node(state: WorkflowState) -> dict[str, dict[str, object]]:
-        result = run_intent_once(state["question"], model, reference_date)
+        result = run_intent_once(state["question"], model, reference_date,
+                                 state.get("session_context"))
         return {"intent": result.model_dump(mode="json")}
 
     def supervisor_node(state: WorkflowState) -> dict[str, object]:
@@ -73,10 +79,19 @@ def build_workflow(
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
         tasks = state["task_plan"]
-        metadata = (
-            answer_table_meta(intent, catalog, database_path, knowledge)
-            if "table_meta" in tasks else None
-        )
+        metadata_parts = []
+        if "table_meta" in tasks:
+            metadata_parts.append(answer_table_meta(intent, catalog, database_path, knowledge))
+        if "lineage" in tasks:
+            metric = next((item for item in catalog if item.name == intent.metric_name), None)
+            if metric is None:
+                metadata_parts.append("指标未在目录中批准，无法追溯血缘。")
+            else:
+                try:
+                    metadata_parts.append(describe_lineage(metric, database_path, knowledge))
+                except ValueError:
+                    metadata_parts.append("指标来源未通过核对，无法追溯血缘。")
+        metadata = "\n".join(metadata_parts) if metadata_parts else None
         if "data_query" not in tasks:
             return {"answer": metadata, "metric_metadata": metadata}
         query_model_for_task = query_model or model
@@ -129,7 +144,7 @@ def build_workflow(
     graph.add_conditional_edges("query", route_after_query, {"analysis": "analysis", "done": END})
     graph.add_edge("analysis", END)
     graph.add_edge("other", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def run_workflow(
@@ -138,12 +153,33 @@ def run_workflow(
     database_path: Path = DEFAULT_DB_PATH,
     query_model: ToolCallingModel | None = None,
     analysis_model: ChatModel | None = None,
+    session_id: str | None = None,
+    checkpoint_path: Path | None = None,
 ) -> WorkflowResult:
     if not question.strip():
         raise ValueError("Question must not be empty")
-    state = build_workflow(
-        model, reference_date, metric_catalog, database_path, query_model, analysis_model
-    ).invoke({"question": question.strip()})
+    if session_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+            raise ValueError("会话 ID 只能包含字母、数字、下划线和短横线，最长 64 位")
+        if checkpoint_path is None:
+            raise ValueError("持久会话需要指定 checkpoint_path")
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with SqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+            graph = build_workflow(model, reference_date, metric_catalog, database_path,
+                                   query_model, analysis_model, checkpointer=saver)
+            config = {"configurable": {"thread_id": session_id}}
+            state = graph.invoke({"question": question.strip()}, config)
+            current = IntentResult.model_validate(state["intent"])
+            context = json.dumps({
+                "metric_name": current.metric_name,
+                "dates": [day.isoformat() for day in current.requested_dates()],
+                "dimensions": current.dimensions,
+            }, ensure_ascii=False)
+            graph.update_state(config, {"session_context": context})
+    else:
+        state = build_workflow(
+            model, reference_date, metric_catalog, database_path, query_model, analysis_model
+        ).invoke({"question": question.strip()})
     return WorkflowResult(
         intent=state["intent"], next_expert=state["next_expert"], answer=state.get("answer")
     )
@@ -152,6 +188,9 @@ def run_workflow(
 def main() -> None:
     parser = argparse.ArgumentParser(description="电商分析 Agent：单一合成数据源与统一取数链")
     parser.add_argument("question", help="输入问题")
+    parser.add_argument("--session-id", help="同一 ID 的问题可使用上一轮已确认信息")
+    parser.add_argument("--checkpoint-db", type=Path,
+                        default=Path("data/sessions/checkpoints.sqlite"))
     args = parser.parse_args()
     if os.environ.get("TAOBAO_UCI_DB_PATH") or os.environ.get("TAOBAO_DEMO_DATA"):
         parser.exit(2, "旧数据源开关已移除；请取消 TAOBAO_UCI_DB_PATH / TAOBAO_DEMO_DATA。\n")
@@ -164,6 +203,7 @@ def main() -> None:
         result = run_workflow(
             args.question, model, date.today(), catalog, database_path,
             query_model=model, analysis_model=model,
+            session_id=args.session_id, checkpoint_path=args.checkpoint_db if args.session_id else None,
         )
     except ModelRateLimitError:
         parser.exit(3, "百炼返回 429：当前请求受限流，本次任务未完成。\n")

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from taobao_agent.model import ChatModel, create_qwen_model
 
 
-IntentType = Literal["data_query", "attribution", "table_meta", "other"]
+IntentType = Literal["data_query", "attribution", "table_meta", "lineage", "other"]
 
 
 class DateRange(BaseModel):
@@ -117,7 +117,8 @@ class IntentResult(BaseModel):
         return (self.curr,) if self.curr is not None else ()
 
 
-def run_intent_once(question: str, model: ChatModel, reference_date: date) -> IntentResult:
+def run_intent_once(question: str, model: ChatModel, reference_date: date,
+                    session_context: str | None = None) -> IntentResult:
     """Call the model once, or use a narrow rule if that call is rate-limited."""
 
     if not question.strip():
@@ -127,7 +128,7 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date) -> In
         "字段必须恰好为 intent_type, secondary_intents, confidence, metric_name, "
         "metric_field, time_label, curr, prev, dates, metric_names, date_range, scope, dimensions。"
         "intent_type 和 secondary_intents 只允许 data_query（取数）、attribution（波动归因）、"
-        "table_meta（指标口径或表结构）、other（其他）。主意图放 intent_type；"
+        "table_meta（指标口径或表结构）、lineage（指标从何处来或血缘）、other（其他）。主意图放 intent_type；"
         "用户明确提出的其余任务都放入 secondary_intents，可有两个，不能只保留一个；"
         "没有则给空数组。confidence 为 0 到 1 的数字。"
         "需要比较数值、找最高最低、找最大下降或分析变化时，主意图为 attribution；"
@@ -152,10 +153,14 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date) -> In
         "没有明确指定则为 null。dimensions 是用户明确要求的分组维度数组，"
         "没有则为空数组。其他缺失字段均用 null。"
         f"今天的参考日期是 {reference_date.isoformat()}，用于解析昨天、前天等相对日期。"
+        "如果本轮没有明确指标或日期，可参考上一轮已确认信息；本轮明确写出的内容优先。"
     )
+    user_prompt = question.strip()
+    if session_context:
+        user_prompt = f"上一轮已确认信息（仅供消解省略）：{session_context}\n本轮问题：{user_prompt}"
     try:
         response = model.invoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=question.strip())]
+            [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         )
     except ModelRateLimitError:
         fallback = rule_fallback(question, reference_date)
