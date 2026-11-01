@@ -118,7 +118,8 @@ class IntentResult(BaseModel):
 
 
 def run_intent_once(question: str, model: ChatModel, reference_date: date,
-                    session_context: str | None = None) -> IntentResult:
+                    session_context: str | None = None,
+                    conversation_context: str | None = None) -> IntentResult:
     """Call the model once, or use a narrow rule if that call is rate-limited."""
 
     if not question.strip():
@@ -168,6 +169,11 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
     user_prompt = question.strip()
     if session_context:
         user_prompt = f"上一轮已确认信息（仅供消解省略）：{session_context}\n本轮问题：{user_prompt}"
+    if conversation_context:
+        user_prompt = (
+            "同会话历史（只用于理解指代和省略；历史答案不是数据证据，数值仍须重新查询）：\n"
+            f"{conversation_context}\n{user_prompt}"
+        )
     try:
         response = model.invoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]

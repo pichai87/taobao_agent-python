@@ -16,7 +16,7 @@ from taobao_agent.commerce_data import (
 )
 from taobao_agent.evaluation import load_dataset, score_case
 from taobao_agent.knowledge import KNOWLEDGE_PATH, load_knowledge
-from taobao_agent.harness import HarnessError, RunHarness
+from taobao_agent.agents.harness import HarnessError, RunHarness
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.ops_store import record_quality_run

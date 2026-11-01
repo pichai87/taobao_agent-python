@@ -2,7 +2,7 @@
   "model": {
     "name": "百亿补贴日报",
     "table": "commerce_daily",
-    "source": "synthetic-commerce-v1",
+    "source": "synthetic-commerce-v2",
     "columns": {
       "biz_date": "业务日期",
       "industry": "行业",
@@ -11,7 +11,15 @@
       "order_count": "订单数",
       "pay_amount_cents": "支付金额（分）"
     },
-    "dimensions": {"行业": "industry"}
+    "dimensions": {"行业": "industry"},
+    "upstream": {
+      "biz_date": "fact_visit_daily.biz_date",
+      "industry": "dim_product.industry",
+      "activity_type": "dim_activity.activity_type",
+      "visitor_uv": "fact_visit_daily.visitor_uv",
+      "order_count": "COUNT(fact_order.order_id WHERE order_status=paid)",
+      "pay_amount_cents": "SUM(fact_order.pay_amount_cents WHERE order_status=paid)"
+    }
   },
   "rules": [
     {

@@ -10,7 +10,7 @@ from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
-from taobao_agent.intent_agent import main, run_intent_once
+from taobao_agent.agents.intent_agent import main, run_intent_once
 
 
 class FakeModel:
@@ -179,7 +179,7 @@ class IntentAgentTest(unittest.TestCase):
         with (
             patch("sys.argv", ["taobao-intent", "昨天 GMV 多少？"]),
             patch("sys.stdout", output),
-            patch("taobao_agent.intent_agent.create_qwen_model", return_value=model),
+            patch("taobao_agent.agents.intent_agent.create_qwen_model", return_value=model),
         ):
             main()
 

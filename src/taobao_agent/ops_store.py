@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH, inspect_metric, query_metric
+from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH, inspect_metric, query_metric, verify_etl
 from taobao_agent.metric_catalog import load_metric_catalog
 
 
@@ -52,6 +52,8 @@ def record_quality_run(database_path: Path = DEFAULT_DB_PATH,
         connection.commit()
         logs = ["开始核对合成数据来源、指标字段和可执行查询"]
         try:
+            verify_etl(database_path)
+            logs.append("上游订单、维表和访客表与日报重新计算一致")
             catalog = load_metric_catalog(CATALOG_PATH)
             for metric in catalog:
                 first, last, fields = inspect_metric(metric, database_path)

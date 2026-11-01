@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from taobao_agent.commerce_data import (
     SOURCE_ID, CommerceDataError, inspect_metric, query_metric,
 )
-from taobao_agent.harness import HarnessError, RunHarness, ToolUnavailableError, guarded_metric_search
-from taobao_agent.intent_agent import IntentResult
+from taobao_agent.agents.harness import HarnessError, RunHarness, ToolUnavailableError, guarded_metric_search
+from taobao_agent.agents.intent_agent import IntentResult
 from taobao_agent.knowledge import KnowledgeBase, SqlSnippet, load_knowledge
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.metric_sql import MetricQuery, build_metric_query

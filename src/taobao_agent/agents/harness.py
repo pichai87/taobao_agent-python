@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Sequence
+from typing import Callable, Sequence
 from uuid import uuid4
 
 from taobao_agent.metric_search import MetricDefinition, search_metrics
@@ -23,9 +23,10 @@ _ALLOWED = {
     "supervisor": frozenset({"plan_tasks"}),
     "query": frozenset({"answer_query", "choose_tool", "search_metrics", "rule_search",
                          "cap_search", "snippet_search", "build_sql", "execute_query"}),
-    "analysis": frozenset({"analyze"}),
-    "ops": frozenset({"read_runs"}),
-    "other": frozenset({"answer_other"}),
+    "analysis": frozenset({"analyze", "choose_view", "funnel_reconcile",
+                           "segment_contribution"}),
+    "ops": frozenset({"read_runs", "read_run_logs"}),
+    "other": frozenset({"answer_other", "list_capabilities"}),
 }
 
 
@@ -33,7 +34,8 @@ class RunHarness:
     """A per-question guard. Records names/status only, never prompts or tool arguments."""
 
     def __init__(self, record_path: Path | None = None, *, timeout_seconds: float = 120,
-                 max_calls: int = 64) -> None:
+                 max_calls: int = 64,
+                 event_sink: Callable[[dict[str, object]], None] | None = None) -> None:
         if timeout_seconds <= 0 or max_calls < 1:
             raise ValueError("Harness 时间与调用次数必须为正数")
         self.run_id = uuid4().hex
@@ -42,6 +44,7 @@ class RunHarness:
         self.max_calls = max_calls
         self.calls = 0
         self.events: list[dict[str, object]] = []
+        self.event_sink = event_sink
 
     def record(self, expert: str, action: str, status: str, elapsed_ms: int = 0,
                 error_type: str | None = None) -> None:
@@ -51,6 +54,8 @@ class RunHarness:
             "elapsed_ms": elapsed_ms, "error_type": error_type,
         }
         self.events.append(event)
+        if self.event_sink is not None:
+            self.event_sink(event.copy())
         if self.record_path is not None:
             self.record_path.parent.mkdir(parents=True, exist_ok=True)
             with self.record_path.open("a", encoding="utf-8") as stream:

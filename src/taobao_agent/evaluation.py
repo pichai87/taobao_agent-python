@@ -10,10 +10,10 @@ from time import perf_counter
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH
-from taobao_agent.intent_agent import DateRange, IntentType
+from taobao_agent.agents.intent_agent import DateRange, IntentType
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.model import ToolCallingModel, create_qwen_model
-from taobao_agent.supervisor import ExpertName
+from taobao_agent.agents.supervisor import ExpertName
 from taobao_agent.workflow import WorkflowResult, run_workflow
 
 

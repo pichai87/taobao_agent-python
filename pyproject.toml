@@ -5,16 +5,18 @@ description = "A gradual LangGraph learning project for ecommerce data analysis"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "fastapi>=0.135,<1",
     "langchain-openai>=1,<2",
     "langgraph>=1,<2",
     "langgraph-checkpoint-sqlite>=3,<4",
     "pydantic>=2,<3",
     "sqlglot>=27,<28",
+    "uvicorn>=0.30,<1",
 ]
 
 [project.scripts]
 taobao-agent = "taobao_agent.workflow:main"
-taobao-intent = "taobao_agent.intent_agent:main"
+taobao-intent = "taobao_agent.agents.intent_agent:main"
 taobao-seed-commerce = "taobao_agent.commerce_data:main"
 taobao-eval = "taobao_agent.evaluation:main"
 taobao-check-data = "taobao_agent.ops_store:main"
@@ -26,3 +28,8 @@ build-backend = "uv_build"
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
 default = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+]

@@ -1,7 +1,6 @@
 """One approved SQL shape for every commerce metric, period and optional group."""
 
 import re
-from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from datetime import date
 
@@ -46,20 +45,3 @@ def build_metric_query(
         f"WHERE {day} >= ? AND {day} <= ? AND {condition} = ?{group_clause}"
     )
     return MetricQuery(statement, (start.isoformat(), end.isoformat(), calculation.condition.value))
-
-
-def validate_metric_query(
-    candidate: MetricQuery, metric: MetricDefinition, start: date, end: date,
-    group_by: str | None, approved_columns: Mapping[str, Set[str]],
-) -> MetricQuery:
-    """At the database boundary, compare full SQL, parameters and actual columns."""
-
-    expected = build_metric_query(metric, start, end, group_by)
-    calculation = metric.calculation
-    required = {metric.field, calculation.date_field, calculation.condition.field}
-    if group_by:
-        required.add(_GROUP_COLUMNS[group_by])
-    actual = approved_columns.get(metric.table)
-    if actual is None or not required <= actual or candidate != expected:
-        raise ValueError("SQL、参数或字段未获批准")
-    return candidate

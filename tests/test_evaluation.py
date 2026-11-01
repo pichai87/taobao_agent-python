@@ -4,7 +4,7 @@ import unittest
 from datetime import date
 
 from taobao_agent.evaluation import load_dataset, score_case
-from taobao_agent.intent_agent import IntentResult
+from taobao_agent.agents.intent_agent import IntentResult
 from taobao_agent.workflow import WorkflowResult
 
 

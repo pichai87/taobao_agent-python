@@ -7,27 +7,28 @@ import re
 import sqlite3
 from datetime import date
 from pathlib import Path
-from typing import NotRequired, Sequence, TypedDict
+from typing import Callable, NotRequired, Sequence, TypedDict
 
 from langchain_core.exceptions import ModelRateLimitError
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 
-from taobao_agent.analysis_agent import answer_analysis_question
+from taobao_agent.agents.analysis_agent import answer_analysis_question
 from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH
-from taobao_agent.intent_agent import IntentResult, run_intent_once
-from taobao_agent.harness import RunHarness, ToolUnavailableError
+from taobao_agent.agents.intent_agent import IntentResult, run_intent_once
+from taobao_agent.agents.harness import RunHarness, ToolUnavailableError
 from taobao_agent.knowledge import load_knowledge
 from taobao_agent.lineage import describe_lineage
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
 from taobao_agent.model import ChatModel, ToolCallingModel, create_qwen_model
-from taobao_agent.other_agent import answer_other
-from taobao_agent.ops_agent import answer_ops
+from taobao_agent.memory import recall, remember
+from taobao_agent.agents.other_agent import answer_other
+from taobao_agent.agents.ops_agent import answer_ops
 from taobao_agent.ops_store import DEFAULT_OPS_PATH
-from taobao_agent.query_agent import QueryEvidence, answer_query, answer_table_meta, fetch_query_evidence
-from taobao_agent.supervisor import ExpertName, TaskName, plan_with_model, select_expert
+from taobao_agent.agents.query_agent import QueryEvidence, answer_query, answer_table_meta, fetch_query_evidence
+from taobao_agent.agents.supervisor import ExpertName, TaskName, plan_with_model, select_expert
 
 
 class WorkflowState(TypedDict):
@@ -40,6 +41,7 @@ class WorkflowState(TypedDict):
     query_evidence: NotRequired[dict[str, object] | None]
     answer: NotRequired[str]
     session_context: NotRequired[str]
+    conversation_context: NotRequired[str]
 
 
 class WorkflowResult(BaseModel):
@@ -67,7 +69,8 @@ def build_workflow(
 
     def intent_node(state: WorkflowState) -> dict[str, dict[str, object]]:
         result = runtime.call("intent", "recognize_intent", lambda: run_intent_once(
-            state["question"], model, reference_date, state.get("session_context")))
+            state["question"], model, reference_date, state.get("session_context"),
+            state.get("conversation_context")))
         return {"intent": result.model_dump(mode="json")}
 
     def supervisor_node(state: WorkflowState) -> dict[str, object]:
@@ -84,11 +87,10 @@ def build_workflow(
 
     def other_node(state: WorkflowState) -> dict[str, str]:
         return {"answer": runtime.call("other", "answer_other",
-                                       lambda: answer_other(state["question"]))}
+                                       lambda: answer_other(state["question"], runtime))}
 
     def ops_node(state: WorkflowState) -> dict[str, str]:
-        return {"answer": runtime.call("ops", "read_runs",
-                                       lambda: answer_ops(state["question"], ops_path))}
+        return {"answer": answer_ops(state["question"], ops_path, runtime)}
 
     def query_node(state: WorkflowState) -> dict[str, object]:
         intent = IntentResult.model_validate(state["intent"])
@@ -107,7 +109,8 @@ def build_workflow(
                     metadata_parts.append("指标来源未通过核对，无法追溯血缘。")
         metadata = "\n".join(metadata_parts) if metadata_parts else None
         if "data_query" not in tasks:
-            return {"answer": metadata, "metric_metadata": metadata}
+            return {"answer": metadata, "metric_metadata": metadata,
+                    "query_evidence": None}
         query_model_for_task = query_model or model
         if not hasattr(query_model_for_task, "bind_tools"):
             return {"answer": "取数模型不支持工具调用；没有执行查询。", "query_evidence": None}
@@ -122,12 +125,12 @@ def build_workflow(
         answer = answer_query(result)
         if metadata:
             answer = f"指标口径：{metadata}\n查询结果：{answer}"
-        return {"answer": answer}
+        return {"answer": answer, "query_evidence": result.model_dump(mode="json")}
 
     def analysis_node(state: WorkflowState) -> dict[str, str]:
         evidence = QueryEvidence.model_validate(state["query_evidence"])
         answer = runtime.call("analysis", "analyze", lambda: answer_analysis_question(
-            state["question"], evidence, analysis_model or model))
+            state["question"], evidence, analysis_model or model, runtime))
         if state.get("metric_metadata"):
             answer = f"指标口径：{state['metric_metadata']}\n分析结果：{answer}"
         return {"answer": answer}
@@ -172,10 +175,12 @@ def run_workflow(
     ops_path: Path = DEFAULT_OPS_PATH,
     record_path: Path | None = Path("data/ops/execution_events.jsonl"),
     timeout_seconds: float = 120,
+    event_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> WorkflowResult:
     if not question.strip():
         raise ValueError("Question must not be empty")
-    runtime = RunHarness(record_path, timeout_seconds=timeout_seconds)
+    runtime = RunHarness(record_path, timeout_seconds=timeout_seconds,
+                         event_sink=event_sink)
     runtime.record("workflow", "run", "started")
     try:
         state = _invoke_workflow(
@@ -209,7 +214,9 @@ def _invoke_workflow(
                                    query_model, analysis_model, checkpointer=saver,
                                    ops_path=ops_path, harness=runtime)
             config = {"configurable": {"thread_id": session_id}}
-            state = graph.invoke({"question": question.strip()}, config)
+            history = recall(checkpoint_path, session_id, question)
+            state = graph.invoke({"question": question.strip(),
+                                  "conversation_context": history}, config)
             current = IntentResult.model_validate(state["intent"])
             context = json.dumps({
                 "metric_name": current.metric_name,
@@ -219,6 +226,11 @@ def _invoke_workflow(
                 "scope": current.scope,
             }, ensure_ascii=False)
             graph.update_state(config, {"session_context": context})
+            tasks = state.get("task_plan", [])
+            if (state.get("answer") and tasks
+                    and ("data_query" not in tasks or state.get("query_evidence") is not None)):
+                remember(checkpoint_path, session_id, question.strip(), state["answer"],
+                         json.loads(context))
     else:
         state = build_workflow(
             model, reference_date, metric_catalog, database_path, query_model, analysis_model,

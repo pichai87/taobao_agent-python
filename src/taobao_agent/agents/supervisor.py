@@ -6,7 +6,7 @@ from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from taobao_agent.intent_agent import IntentResult
+from taobao_agent.agents.intent_agent import IntentResult
 from taobao_agent.model import ChatModel
 
 

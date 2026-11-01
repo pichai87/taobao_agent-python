@@ -3,7 +3,7 @@
     "name": "GMV",
     "table": "commerce_daily",
     "field": "pay_amount_cents",
-    "source": "synthetic-commerce-v1",
+    "source": "synthetic-commerce-v2",
     "calculation": {
       "aggregation": "sum",
       "date_field": "biz_date",
@@ -15,7 +15,7 @@
     "name": "访客数",
     "table": "commerce_daily",
     "field": "visitor_uv",
-    "source": "synthetic-commerce-v1",
+    "source": "synthetic-commerce-v2",
     "calculation": {
       "aggregation": "sum",
       "date_field": "biz_date",
@@ -27,7 +27,7 @@
     "name": "订单数",
     "table": "commerce_daily",
     "field": "order_count",
-    "source": "synthetic-commerce-v1",
+    "source": "synthetic-commerce-v2",
     "calculation": {
       "aggregation": "sum",
       "date_field": "biz_date",

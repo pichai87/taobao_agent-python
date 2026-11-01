@@ -20,6 +20,7 @@ class SemanticModel(BaseModel):
     source: str = Field(min_length=1)
     columns: dict[str, str]
     dimensions: dict[str, str]
+    upstream: dict[str, str] = Field(default_factory=dict)
 
 
 class BusinessRule(BaseModel):
@@ -63,6 +64,8 @@ class KnowledgeBase(BaseModel):
             raise ValueError("知识规则与指标注册表不一致")
         if set(self.model.dimensions.values()) - self.model.columns.keys():
             raise ValueError("MDL 维度字段不在表结构中")
+        if set(self.model.upstream) != self.model.columns.keys():
+            raise ValueError("MDL 缺少日报字段的上游映射")
         for metric in catalog:
             calculation = metric.calculation
             if calculation is None or metric.table != self.model.table or metric.source != self.model.source:
