@@ -123,6 +123,9 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
 
     if not question.strip():
         raise ValueError("Question must not be empty")
+    anchored = _anchored_previous_day(question, session_context)
+    if anchored is not None:
+        return anchored
     system_prompt = (
         "你是电商数据分析助手的意图识别入口。只输出一个 JSON 对象，不回答问题，不编造数据。"
         "字段必须恰好为 intent_type, secondary_intents, confidence, metric_name, "
@@ -134,11 +137,15 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
         "没有则给空数组。confidence 为 0 到 1 的数字。"
         "需要比较数值、找最高最低、找最大下降或分析变化时，主意图为 attribution；"
         "即使用户没有说‘为什么’，也不能归为纯 data_query。"
+        "只问‘为什么下降’或‘按行业分析下降’时，data_query 是后续执行分析的前置任务，"
+        "不是用户明确提出的次要意图；secondary_intents 应为空数组。"
+        "只有用户另行要求‘给出两天具体数值’、‘查询数据’等独立取数结果时，"
+        "才同时输出 data_query 次要意图。不要把内部任务依赖写成用户意图。"
         "询问指标使用哪个表、哪个字段或怎样计算时，意图为 table_meta。"
         "如果同一个问题既问计算口径又问具体日期的数值，必须同时输出 table_meta 和"
         "data_query；如果还问变化原因，还要包含 attribution。"
         "这三项可由主意图和 secondary_intents 共同表达，不能漏掉用户明确的任务。"
-        "metric_name 写用户提到的业务指标名称；没有则为 null。当前没有语义模型，"
+        "metric_name 写用户提到的业务指标名称；没有则为 null。字段需要在后续知识层核对，"
         "即使问题是表字段或计算口径，也要从用户原句提取指标名，不要因为它是元数据问题就填 null。"
         "metric_field 必须为 null，不能猜测数据库字段。"
         "time_label 保留用户的时间表述；curr 是主查询或最后一个日期，prev 是比较基准日期；"
@@ -146,7 +153,9 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
         "若用户明确提到多个指标，metric_names 按原顺序列出全部指标，metric_name 等于首项；"
         "单指标时 metric_names 可以为空数组。若用户问连续日期范围，date_range 写"
         "{\"start\":\"YYYY-MM-DD\",\"end\":\"YYYY-MM-DD\"}，否则为 null；"
-        "日期范围时优先让 dates 为空数组，curr/prev 可分别是范围末日/首日；"
+        "问题明确写‘日期 A 至/到 日期 B’且是取数时，必须把 date_range 写为这两个端点，"
+        "dates 留空；不能把连续范围拆成两个单日查询。"
+        "日期范围时 curr/prev 可分别是范围末日/首日；"
         "如果也填写 dates，必须从范围首日到末日按日期升序列出。"
         "若 dates 非空，首项须与非空 prev 一致，末项须与非空 curr 一致。"
         "日期用 YYYY-MM-DD 字符串，没有明确或可解析的日期就填 null，dates 没有则为空数组。"
@@ -171,7 +180,46 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
     if not isinstance(response.content, str):
         raise ValueError("Model response must be a JSON string")
     result = IntentResult.model_validate_json(response.content)
+    range_match = re.search(
+        r"(?<!\d)(\d{4}-\d{2}-\d{2})\s*(?:至|到)\s*(\d{4}-\d{2}-\d{2})(?!\d)",
+        question,
+    )
+    if result.intent_type == "data_query" and result.date_range is None and range_match:
+        start, end = (date.fromisoformat(value) for value in range_match.groups())
+        if result.requested_dates() == (start, end):
+            payload = result.model_dump(mode="json")
+            payload["date_range"] = {"start": start.isoformat(), "end": end.isoformat()}
+            payload["dates"] = []
+            result = IntentResult.model_validate(payload)
     return result.model_copy(update={"source": "llm"})
+
+
+def _anchored_previous_day(question: str, session_context: str | None) -> IntentResult | None:
+    """Resolve one unambiguous ellipsis from a single verified previous date."""
+
+    if not session_context or re.sub(r"[\s?？。!！]", "", question) not in {
+        "那前一天呢", "前一天呢", "那前一天", "前一天",
+    }:
+        return None
+    try:
+        context = json.loads(session_context)
+        dates = context.get("dates")
+        name = context.get("metric_name")
+        if not isinstance(dates, list) or len(dates) != 1 or not isinstance(name, str):
+            return None
+        previous = date.fromisoformat(dates[0]) - timedelta(days=1)
+        if not name.strip():
+            return None
+        return IntentResult(
+            intent_type="data_query", secondary_intents=[], confidence=1.0,
+            metric_name=name, metric_names=context.get("metric_names") or [],
+            metric_field=None, time_label="承接上轮日期的前一天",
+            curr=previous.isoformat(), prev=None, dates=[previous.isoformat()],
+            scope=context.get("scope"), dimensions=context.get("dimensions") or [],
+            source="rule",
+        )
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def rule_fallback(question: str, reference_date: date) -> IntentResult | None:

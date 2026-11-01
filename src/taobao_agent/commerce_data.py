@@ -9,6 +9,7 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from time import monotonic
 
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_search import MetricDefinition
@@ -154,6 +155,7 @@ def inspect_metric(metric: MetricDefinition, database_path: Path) -> tuple[str, 
 def query_metric(
     metric: MetricDefinition, start: date, end: date, database_path: Path,
     group_by: str | None = None, *, candidate: MetricQuery | None = None,
+    deadline: float | None = None,
 ) -> MetricResult:
     """Execute the exact validated SQL through one read-only boundary."""
 
@@ -164,6 +166,8 @@ def query_metric(
     try:
         connection, columns, first, last = _checked_connection(database_path)
         with closing(connection):
+            if deadline is not None:
+                connection.set_progress_handler(lambda: int(monotonic() >= deadline), 1000)
             if start.isoformat() < first or end.isoformat() > last:
                 raise CommerceDataError(f"合成数据只覆盖 {first} 至 {last}")
             proposed = candidate or build_metric_query(metric, start, end, group_by)
@@ -183,6 +187,8 @@ def query_metric(
     except (OSError, sqlite3.Error, ValueError) as exc:
         if isinstance(exc, CommerceDataError):
             raise
+        if isinstance(exc, sqlite3.OperationalError) and "interrupted" in str(exc).lower():
+            raise CommerceDataError("数据库查询超过时限") from exc
         raise CommerceDataError("查询未通过校验或数据库执行失败") from exc
 
 

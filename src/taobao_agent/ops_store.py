@@ -4,7 +4,7 @@ import argparse
 import json
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from taobao_agent.commerce_data import CATALOG_PATH, DEFAULT_DB_PATH, inspect_metric, query_metric
@@ -30,6 +30,20 @@ def record_quality_run(database_path: Path = DEFAULT_DB_PATH,
         connection.execute("CREATE TABLE IF NOT EXISTS logs ("
                            "run_id INTEGER NOT NULL, step INTEGER NOT NULL, message TEXT NOT NULL, "
                            "PRIMARY KEY (run_id, step), FOREIGN KEY (run_id) REFERENCES runs(id))")
+        stale_before = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        stale = connection.execute(
+            "SELECT id FROM runs WHERE status='running' AND started_at < ?", (stale_before,)
+        ).fetchall()
+        for (old_id,) in stale:
+            connection.execute(
+                "UPDATE runs SET status='failed', finished_at=?, summary=? WHERE id=?",
+                (_utc_now(), "上次进程中断，超过 5 分钟未完成", old_id),
+            )
+            next_step = connection.execute(
+                "SELECT COALESCE(MAX(step),0)+1 FROM logs WHERE run_id=?", (old_id,)
+            ).fetchone()[0]
+            connection.execute("INSERT INTO logs VALUES (?,?,?)",
+                               (old_id, next_step, "恢复检查：旧运行超过 5 分钟，标记为 failed"))
         cursor = connection.execute(
             "INSERT INTO runs(job_name,status,started_at,summary) VALUES (?,?,?,?)",
             ("commerce_quality", "running", _utc_now(), "数据质量检查运行中"),

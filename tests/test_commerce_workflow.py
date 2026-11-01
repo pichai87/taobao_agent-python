@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from time import monotonic
 import unittest
 from contextlib import closing
 from datetime import date
@@ -15,6 +16,7 @@ from taobao_agent.commerce_data import (
 )
 from taobao_agent.evaluation import load_dataset, score_case
 from taobao_agent.knowledge import KNOWLEDGE_PATH, load_knowledge
+from taobao_agent.harness import HarnessError, RunHarness
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
 from taobao_agent.ops_store import record_quality_run
@@ -140,16 +142,24 @@ class CommerceWorkflowTest(unittest.TestCase):
                 return super().invoke(messages)
 
         same = FollowUpModel()
-        answer = run_workflow("那前一天呢？", same, date(2026, 11, 1), self.catalog,
+        answer = run_workflow("同一指标，改查上一轮日期前一天的数据", same, date(2026, 11, 1), self.catalog,
                               self.database, query_model=same, session_id="alice",
                               checkpoint_path=checkpoint)
         self.assertIn("2026-10-22", same.prior_context)
         self.assertIn("2026-10-21", answer.answer)
         other = FollowUpModel()
-        run_workflow("那前一天呢？", other, date(2026, 11, 1), self.catalog,
+        run_workflow("同一指标，改查上一轮日期前一天的数据", other, date(2026, 11, 1), self.catalog,
                      self.database, query_model=other, session_id="bob",
                      checkpoint_path=checkpoint)
         self.assertNotIn("上一轮已确认信息", other.prior_context)
+
+        exact = FakeModel(intent_payload("data_query", dates=["2026-10-20"]))
+        resolved = run_workflow("那前一天呢？", exact, date(2026, 11, 1), self.catalog,
+                                self.database, query_model=exact, session_id="alice",
+                                checkpoint_path=checkpoint)
+        self.assertEqual(exact.intent_calls, 0)
+        self.assertEqual(resolved.intent.source, "rule")
+        self.assertIn("2026-10-20", resolved.answer)
 
     def test_ops_reads_actual_success_failure_and_missing_run(self) -> None:
         ops_path = self.database.parent / "ops.sqlite"
@@ -158,7 +168,8 @@ class CommerceWorkflowTest(unittest.TestCase):
         self.assertEqual((good_id, bad_id), (1, 2))
         model = FakeModel(intent_payload("ops", metric=""))
         latest = run_workflow("最新一次数据质量任务为什么失败？", model,
-                              date(2026, 11, 1), self.catalog, self.database,
+                              date(2026, 11, 1), self.catalog,
+                              self.database.parent / "missing.sqlite",
                               ops_path=ops_path)
         self.assertEqual(latest.next_expert, "ops")
         self.assertIn("#2", latest.answer)
@@ -170,6 +181,61 @@ class CommerceWorkflowTest(unittest.TestCase):
         self.assertIn("#1", first.answer)
         self.assertIn("success", first.answer)
         self.assertNotIn("#2", first.answer)
+
+    def test_harness_permissions_retry_budget_and_private_trace(self) -> None:
+        trace = self.database.parent / "events.jsonl"
+        harness = RunHarness(trace, max_calls=3)
+        with self.assertRaises(HarnessError):
+            harness.call("analysis", "execute_query", lambda: 1)
+        attempts = 0
+
+        def transient():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionError("secret-token-should-not-be-recorded")
+            return "recovered"
+
+        self.assertEqual(harness.call("query", "search_metrics", transient), "recovered")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(harness.call("ops", "read_runs", lambda: 1), 1)
+        with self.assertRaises(HarnessError):
+            harness.call("ops", "read_runs", lambda: 2)
+        records = [json.loads(line) for line in trace.read_text().splitlines()]
+        self.assertEqual([item["status"] for item in records],
+                         ["denied", "retry", "success", "success", "budget_exceeded"])
+        self.assertNotIn("secret-token", trace.read_text())
+        expired = RunHarness(timeout_seconds=1)
+        expired.deadline = monotonic() - 1
+        with self.assertRaises(HarnessError):
+            expired.call("query", "execute_query", lambda: 1)
+
+    def test_workflow_trace_has_run_id_and_no_question(self) -> None:
+        trace = self.database.parent / "events.jsonl"
+        model = FakeModel(intent_payload("data_query", dates=["2026-10-22"]))
+        result = run_workflow("2026-10-22 GMV 多少？", model, date(2026, 11, 1),
+                              self.catalog, self.database, query_model=model, record_path=trace)
+        records = [json.loads(line) for line in trace.read_text().splitlines()]
+        self.assertEqual(records[0]["status"], "started")
+        self.assertEqual(records[-1]["status"], "completed")
+        self.assertTrue(all(item["run_id"] == result.run_id for item in records))
+        self.assertIn("execute_query", [item["action"] for item in records])
+        self.assertNotIn("GMV 多少", trace.read_text())
+
+    def test_ops_recovery_marks_only_stale_running_jobs(self) -> None:
+        ops_path = self.database.parent / "ops.sqlite"
+        record_quality_run(self.database, ops_path)
+        with closing(sqlite3.connect(ops_path)) as connection:
+            connection.execute("INSERT INTO runs(job_name,status,started_at,summary) "
+                               "VALUES ('commerce_quality','running','2020-01-01T00:00:00+00:00','old')")
+            connection.commit()
+        record_quality_run(self.database, ops_path)
+        with closing(sqlite3.connect(ops_path)) as connection:
+            row = connection.execute("SELECT status,summary FROM runs WHERE id=2").fetchone()
+            logs = connection.execute("SELECT message FROM logs WHERE run_id=2").fetchall()
+        self.assertEqual(row[0], "failed")
+        self.assertIn("进程中断", row[1])
+        self.assertIn("恢复检查", logs[0][0])
 
     def test_one_query_path_handles_single_day_and_range_group_multi_metric(self) -> None:
         single = FakeModel(intent_payload("data_query", dates=["2026-10-22"]))
@@ -194,6 +260,30 @@ class CommerceWorkflowTest(unittest.TestCase):
         self.assertEqual(multi.proposed_tools,
                          ["search_metrics", "snippet_search", "rule_search",
                           "cap_search", "build_sql", "execute_query"])
+
+    def test_explicit_range_endpoints_are_not_mistaken_for_two_single_days(self) -> None:
+        model = FakeModel(intent_payload(
+            "data_query", dates=["2026-10-21", "2026-10-22"],
+            metric_names=["GMV", "访客数", "订单数"], dimensions=["行业"],
+        ))
+        result = self.run_case(
+            "2026-10-21 至 2026-10-22 按行业看百亿补贴 GMV、访客数和订单数。", model
+        )
+        self.assertEqual(result.intent.date_range.start, date(2026, 10, 21))
+        self.assertEqual(result.intent.date_range.end, date(2026, 10, 22))
+        self.assertEqual(result.intent.dates, [])
+        self.assertIn("44600.00 元", result.answer)
+        self.assertIn("4900 人", result.answer)
+
+    def test_analysis_dates_remain_two_observations_even_with_range_word(self) -> None:
+        model = FakeModel(intent_payload(
+            "attribution", dates=["2026-10-21", "2026-10-22"],
+        ))
+        result = self.run_case("2026-10-21 至 2026-10-22 GMV 为什么下降？", model)
+        self.assertIsNone(result.intent.date_range)
+        self.assertEqual(result.intent.requested_dates(),
+                         (date(2026, 10, 21), date(2026, 10, 22)))
+        self.assertIn("下降 3400.00 元", result.answer)
 
     def test_compound_metadata_query_analysis_keeps_all_three_tasks(self) -> None:
         for primary, secondary in (

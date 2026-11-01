@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from taobao_agent.commerce_data import (
     SOURCE_ID, CommerceDataError, inspect_metric, query_metric,
 )
-from taobao_agent.harness import ToolUnavailableError, guarded_metric_search
+from taobao_agent.harness import HarnessError, RunHarness, ToolUnavailableError, guarded_metric_search
 from taobao_agent.intent_agent import IntentResult
 from taobao_agent.knowledge import KnowledgeBase, SqlSnippet, load_knowledge
 from taobao_agent.metric_search import MetricDefinition
@@ -153,6 +153,7 @@ def request_from_intent(intent: IntentResult, question: str) -> QueryRequest:
 def _run_tools(
     request: QueryRequest, catalog: Sequence[MetricDefinition],
     database_path: Path, model: ToolCallingModel, question: str, knowledge: KnowledgeBase,
+    harness: RunHarness,
 ) -> QueryEvidence:
     """Choose relevant knowledge tools; keep SQL construction and execution gated."""
 
@@ -222,7 +223,8 @@ def _run_tools(
             raise ToolProposalError("执行任务与已构建 SQL 不一致")
         results = [
             query_metric(metric, period.start, period.end, database_path, group_by,
-                         candidate=prepared[(metric.name, period.start, period.end)])
+                         candidate=prepared[(metric.name, period.start, period.end)],
+                         deadline=harness.deadline)
             for metric in selected for period in periods
         ]
         return [
@@ -278,7 +280,7 @@ def _run_tools(
             if not available:
                 available = ["build_sql"] if not prepared else ["execute_query"]
         for attempt in range(3):
-            response = bound.invoke(messages)
+            response = harness.call("query", "choose_tool", lambda: bound.invoke(messages))
             if not isinstance(response, AIMessage):
                 raise ToolProposalError("模型没有返回可识别的工具消息")
             if (
@@ -303,7 +305,8 @@ def _run_tools(
                 args = MetricNamesInput.model_validate(proposal.get("args"))
                 if args.metric_names != request.metric_names:
                     raise ToolProposalError("工具指标与任务不一致")
-                output = tools[name].invoke(args.model_dump(mode="json"))
+                output = harness.call("query", name,
+                                      lambda: tools[name].invoke(args.model_dump(mode="json")))
                 if name == "search_metrics":
                     selected = tuple(MetricDefinition.model_validate(item) for item in output)
                     if tuple(metric.name for metric in selected) != request.metric_names:
@@ -324,7 +327,8 @@ def _run_tools(
                 args = SnippetInput.model_validate(proposal.get("args"))
                 if args.group_by != request.group_by:
                     raise ToolProposalError("SQL 片段分组与任务不一致")
-                output = tools[name].invoke(args.model_dump(mode="json"))
+                output = harness.call("query", name,
+                                      lambda: tools[name].invoke(args.model_dump(mode="json")))
                 selected_snippet = SqlSnippet.model_validate(output)
                 if selected_snippet != knowledge.snippet_for(request.group_by):
                     raise ToolProposalError("SQL 片段不是当前批准版本")
@@ -334,7 +338,8 @@ def _run_tools(
                     request.metric_names, request.periods, request.group_by
                 ):
                     raise ToolProposalError("工具查询范围与任务不一致")
-                output = tools[name].invoke(args.model_dump(mode="json"))
+                output = harness.call("query", name,
+                                      lambda: tools[name].invoke(args.model_dump(mode="json")))
             messages.append(ToolMessage(content=json.dumps(output, ensure_ascii=False),
                                         tool_call_id=proposal["id"]))
         except ValidationError as exc:
@@ -348,14 +353,15 @@ def _run_tools(
 def fetch_query_evidence(
     intent: IntentResult, question: str, catalog: Sequence[MetricDefinition],
     database_path: Path, model: ToolCallingModel, knowledge: KnowledgeBase | None = None,
+    harness: RunHarness | None = None,
 ) -> QueryEvidence | str:
     """Return complete verified evidence, or a constrained explanation without partial data."""
 
     try:
         request = request_from_intent(intent, question)
         return _run_tools(request, catalog, database_path, model, question,
-                          knowledge or load_knowledge(catalog))
-    except (ValueError, CommerceDataError, ToolUnavailableError) as exc:
+                          knowledge or load_knowledge(catalog), harness or RunHarness())
+    except (ValueError, CommerceDataError, ToolUnavailableError, HarnessError) as exc:
         if isinstance(exc, ToolProposalError):
             return f"取数专家的工具调用未通过顺序或参数校验（{exc}）；没有返回数据。"
         if isinstance(exc, CommerceDataError):
