@@ -17,6 +17,7 @@ from taobao_agent.evaluation import load_dataset, score_case
 from taobao_agent.knowledge import KNOWLEDGE_PATH, load_knowledge
 from taobao_agent.metric_catalog import load_metric_catalog
 from taobao_agent.metric_sql import MetricQuery, build_metric_query
+from taobao_agent.ops_store import record_quality_run
 from taobao_agent.workflow import build_workflow, run_workflow
 
 
@@ -149,6 +150,26 @@ class CommerceWorkflowTest(unittest.TestCase):
                      self.database, query_model=other, session_id="bob",
                      checkpoint_path=checkpoint)
         self.assertNotIn("上一轮已确认信息", other.prior_context)
+
+    def test_ops_reads_actual_success_failure_and_missing_run(self) -> None:
+        ops_path = self.database.parent / "ops.sqlite"
+        good_id = record_quality_run(self.database, ops_path)
+        bad_id = record_quality_run(self.database.parent / "missing.sqlite", ops_path)
+        self.assertEqual((good_id, bad_id), (1, 2))
+        model = FakeModel(intent_payload("ops", metric=""))
+        latest = run_workflow("最新一次数据质量任务为什么失败？", model,
+                              date(2026, 11, 1), self.catalog, self.database,
+                              ops_path=ops_path)
+        self.assertEqual(latest.next_expert, "ops")
+        self.assertIn("#2", latest.answer)
+        self.assertIn("failed", latest.answer)
+        self.assertIn("日志：", latest.answer)
+        first = run_workflow("看运行编号 1 的状态和日志", model,
+                             date(2026, 11, 1), self.catalog, self.database,
+                             ops_path=ops_path)
+        self.assertIn("#1", first.answer)
+        self.assertIn("success", first.answer)
+        self.assertNotIn("#2", first.answer)
 
     def test_one_query_path_handles_single_day_and_range_group_multi_metric(self) -> None:
         single = FakeModel(intent_payload("data_query", dates=["2026-10-22"]))

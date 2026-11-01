@@ -10,8 +10,8 @@ from taobao_agent.intent_agent import IntentResult
 from taobao_agent.model import ChatModel
 
 
-ExpertName = Literal["query", "analysis", "other"]
-TaskName = Literal["table_meta", "lineage", "data_query", "analysis", "other"]
+ExpertName = Literal["query", "analysis", "ops", "other"]
+TaskName = Literal["table_meta", "lineage", "data_query", "analysis", "ops", "other"]
 
 
 class TaskPlanProposal(BaseModel):
@@ -25,6 +25,8 @@ def plan_tasks(intent: IntentResult) -> tuple[TaskName, ...] | None:
     intents = {intent.intent_type, *intent.secondary_intents}
     if "other" in intents:
         return ("other",) if len(intents) == 1 else None
+    if "ops" in intents:
+        return ("ops",) if len(intents) == 1 else None
     tasks: set[TaskName] = set()
     if "table_meta" in intents:
         tasks.add("table_meta")
@@ -90,4 +92,6 @@ def select_expert(intent: IntentResult, tasks: tuple[TaskName, ...] | None = Non
         return "analysis"
     if planned and any(task in planned for task in ("data_query", "table_meta", "lineage")):
         return "query"
+    if planned == ("ops",):
+        return "ops"
     return "other"

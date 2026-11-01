@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from taobao_agent.model import ChatModel, create_qwen_model
 
 
-IntentType = Literal["data_query", "attribution", "table_meta", "lineage", "other"]
+IntentType = Literal["data_query", "attribution", "table_meta", "lineage", "ops", "other"]
 
 
 class DateRange(BaseModel):
@@ -128,7 +128,8 @@ def run_intent_once(question: str, model: ChatModel, reference_date: date,
         "字段必须恰好为 intent_type, secondary_intents, confidence, metric_name, "
         "metric_field, time_label, curr, prev, dates, metric_names, date_range, scope, dimensions。"
         "intent_type 和 secondary_intents 只允许 data_query（取数）、attribution（波动归因）、"
-        "table_meta（指标口径或表结构）、lineage（指标从何处来或血缘）、other（其他）。主意图放 intent_type；"
+        "table_meta（指标口径或表结构）、lineage（指标从何处来或血缘）、"
+        "ops（任务运行状态、日志或失败信息）、other（其他）。主意图放 intent_type；"
         "用户明确提出的其余任务都放入 secondary_intents，可有两个，不能只保留一个；"
         "没有则给空数组。confidence 为 0 到 1 的数字。"
         "需要比较数值、找最高最低、找最大下降或分析变化时，主意图为 attribution；"
